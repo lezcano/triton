@@ -1,6 +1,7 @@
 add_triton_library(TritonGPUTransforms
   AccelerateMatmul.cpp
   Coalesce.cpp
+  FP32DotTC.cpp
   ReduceDataDuplication.cpp
   OptimizeDotOperands.cpp
   OptimizeThreadLocality.cpp

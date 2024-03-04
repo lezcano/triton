@@ -128,6 +128,8 @@ class CUDABackend(BaseBackend):
         passes.ttir.add_convert_to_ttgpuir(pm, opt.num_warps, 32, opt.num_ctas, capability)
         # optimize TTGIR
         passes.ttgpuir.add_coalesce(pm)
+        if capability // 10 >= 8:
+            passes.ttgpuir.add_fp32_dot_tc(pm)
         # TODO(Qingyi): Move PlanCTAPass to the front of CoalescePass
         nvidia.passes.ttnvgpuir.add_plan_cta(pm, cluster_info)
         passes.ttgpuir.add_remove_layout_conversions(pm)

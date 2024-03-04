@@ -36,6 +36,20 @@ def TritonGPUPipeline : Pass<"tritongpu-pipeline", "mlir::ModuleOp"> {
   ];
 }
 
+def TritonGPUFP32DotTC : Pass<"tritongpu-FP32DotTC", "mlir::ModuleOp"> {
+  let summary = "3xTF32 trick";
+
+  let description = [{
+    Decompose fp32 `DotOp` instructions into 4 pointwise ops and 3 fp16 `DotOp`s
+    to allow using TensorCores. See https://github.com/NVIDIA/cutlass/discussions/385
+  }];
+
+  let constructor = "mlir::triton::gpu::createFP32DotTCPass()";
+
+  let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect",
+                           "mlir::triton::nvidia_gpu::TritonNvidiaGPUDialect"];
+}
+
 def TritonGPUPrefetch : Pass<"tritongpu-prefetch", "mlir::ModuleOp"> {
   let summary = "prefetch";
 
