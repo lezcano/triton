@@ -1288,7 +1288,7 @@ def atomic_xchg(ptr: tl.tensor, val: tl.tensor, mask: tl.tensor, sem: str, scope
 # ===----------------------------------------------------------------------===//
 
 
-def dot(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, f32_backend: str, max_num_imprecise_acc: int,
+def dot(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, f32_backend: Optional[str], max_num_imprecise_acc: int,
         out_dtype: tl.dtype, builder: ir.builder) -> tl.tensor:
 
     def assert_dtypes_valid(lhs_dtype, rhs_dtype, options):
@@ -1322,6 +1322,11 @@ def dot(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, f32_backend: str, max_nu
     assert lhs.type.is_block() and rhs.type.is_block()
 
     assert_dtypes_valid(lhs.dtype, rhs.dtype, builder.options)
+
+    if f32_backend is None:
+        f32_backend = builder.options.default_f32_backend
+    else:
+        assert f32_backend in builder.options.allowed_f32_backends, f"f32 _backend must be one of {builder.options.allowed_f32_backends}. Got {f32_backend}"
 
     lhs_rank = len(lhs.shape)
     rhs_rank = len(rhs.shape)

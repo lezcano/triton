@@ -1403,6 +1403,8 @@ def dot(input, other, acc=None, f32_backend=None, max_num_imprecise_acc=None, ou
     :type input: 2D tensor of scalar-type in {:code:`float16`, :code:`bfloat16`, :code:`float32`}
     :param other: The second tensor to be multiplied.
     :type other: 2D tensor of scalar-type in {:code:`float16`, :code:`bfloat16`, :code:`float32`}
+    :param f32_backend: The backend to use for fp32 x fp32.
+    :type other: string. Available options for nvidia: :code:`"tf32"`, :code:`"3xtf32"`, :code:`"ieee"`. Default: :code:`"tf32"`. Avaliable options for amd: :code:`"ieee"`.
     """
     f32_backend = _constexpr_to_value(f32_backend)
     out_dtype = _constexpr_to_value(out_dtype)

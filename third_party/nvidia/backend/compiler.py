@@ -4,7 +4,7 @@ from triton.backends.nvidia.driver import CudaUtils
 
 from dataclasses import dataclass
 import functools
-from typing import Any
+from typing import Any, Tuple
 import hashlib
 import re
 import tempfile
@@ -62,6 +62,8 @@ class CUDAOptions:
     ptx_version: int = None
     enable_fp_fusion: bool = True
     allow_fp8e4nv: bool = False
+    default_f32_backend: str = "tf32"
+    allowed_f32_backends: Tuple[str] = ("tf32", "3xtf32", "ieee")
     max_num_imprecise_acc_default: bool = None
     extern_libs: dict = None
     debug: bool = False
