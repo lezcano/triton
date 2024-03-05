@@ -9,12 +9,12 @@ namespace {
 
 // Implement 3xTF32 trick https://github.com/NVIDIA/cutlass/discussions/385
 // For a, b fp32
-// dot(a, b, allowTF32=False) ->
+// dot(a, b, f32Backend="3xtf32") ->
 //  let aBig = f32ToTF32(a), aSmall = a - aBig;
 //  let bBig = f32ToTF32(b), bSmall = b - bBig;
-//  dot(aSmall, bBig, allowTF32=True) +
-//  dot(aBig, bSmall, allowTF32=True) +
-//  dot(aBig, bBig, allowTF32=True)
+//  dot(aSmall, bBig, f32Backend="tf32") +
+//  dot(aBig, bSmall, f32Backend="tf32") +
+//  dot(aBig, bBig, f32Backend="tf32")
 class TF32x3 : public OpRewritePattern<tt::DotOp> {
 public:
   using OpRewritePattern::OpRewritePattern;
@@ -30,7 +30,7 @@ public:
           .isF32();
     };
 
-    if (!(!dotOp.getAllowTF32() && isF32(dotOp.getOperand(0)) &&
+    if (!(dotOp.getF32Backend() == "3xtf32" && isF32(dotOp.getOperand(0)) &&
           isF32(dotOp.getOperand(1)))) {
       return mlir::failure();
     }
@@ -49,7 +49,7 @@ public:
     };
     auto dot = [&](mlir::Value a, mlir::Value b, mlir::Value c) -> mlir::Value {
       return rewriter.create<tt::DotOp>(dotOp->getLoc(), c.getType(), a, b, c,
-                                        true, dotOp.getMaxNumImpreciseAcc());
+                                        "tf32", dotOp.getMaxNumImpreciseAcc());
     };
     auto a = dotOp.getOperand(0);
     auto b = dotOp.getOperand(1);

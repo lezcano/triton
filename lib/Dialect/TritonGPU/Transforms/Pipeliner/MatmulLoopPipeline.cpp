@@ -1020,7 +1020,7 @@ void mlir::triton::asyncLaunchDots(scf::ForOp forOp) {
     builder.setInsertionPoint(dotOp);
     auto dotAsync = builder.create<tt::nvidia_gpu::DotAsyncOp>(
         dotOp.getLoc(), dotOp.getA(), dotOp.getB(), dotOp.getC(),
-        dotOp.getAllowTF32(), dotOp.getMaxNumImpreciseAcc());
+        dotOp.getF32Backend(), dotOp.getMaxNumImpreciseAcc());
     dotOp.replaceAllUsesWith(dotAsync.getResult());
     dotOp->erase();
   }

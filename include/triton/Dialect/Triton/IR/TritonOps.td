@@ -565,7 +565,7 @@ def TT_DotOp : TT_Op<"dot", [Pure,
       TT_FpIntTensor:$a,
       TT_FpIntTensor:$b,
       TT_FpIntTensor:$c,
-      BoolAttr:$allowTF32,
+      StrAttr:$f32Backend,
       I32Attr:$maxNumImpreciseAcc);
 
     let results = (outs TT_FpIntTensor:$d);

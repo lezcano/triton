@@ -1359,9 +1359,10 @@ void init_triton_ir(py::module &&m) {
                  self.getBuilder().getI32IntegerAttr(axis));
            })
       .def("create_dot",
-           [](TritonOpBuilder &self, Value &a, Value &b, Value &c,
-              bool allowTF32, int maxNumImpreciseAcc) -> Value {
-             return self.create<DotOp>(c.getType(), a, b, c, allowTF32,
+           [](TritonOpBuilder &self, mlir::Value &a, mlir::Value &b,
+              mlir::Value &c, const std::string &f32Backend,
+              int maxNumImpreciseAcc) -> mlir::Value {
+             return self.create<DotOp>(c.getType(), a, b, c, f32Backend,
                                        maxNumImpreciseAcc);
            })
       .def("create_floor",

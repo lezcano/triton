@@ -295,7 +295,7 @@ public:
     a = rewriter.create<ttg::ConvertLayoutOp>(a.getLoc(), newAType, a);
     b = rewriter.create<ttg::ConvertLayoutOp>(b.getLoc(), newBType, b);
     auto newDot = rewriter.create<tt::DotOp>(dotOp.getLoc(), newAcc.getType(),
-                                             a, b, newAcc, dotOp.getAllowTF32(),
+                                             a, b, newAcc, dotOp.getF32Backend(),
                                              dotOp.getMaxNumImpreciseAcc());
 
     Value dotOutput =
