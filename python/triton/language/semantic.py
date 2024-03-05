@@ -1288,7 +1288,7 @@ def atomic_xchg(ptr: tl.tensor, val: tl.tensor, mask: tl.tensor, sem: str, scope
 # ===----------------------------------------------------------------------===//
 
 
-def dot(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, allow_tf32: bool, max_num_imprecise_acc: int,
+def dot(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, f32_backend: str, max_num_imprecise_acc: int,
         out_dtype: tl.dtype, builder: ir.builder) -> tl.tensor:
 
     def assert_dtypes_valid(lhs_dtype, rhs_dtype, options):
@@ -1364,7 +1364,7 @@ def dot(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, allow_tf32: bool, max_nu
         else:
             max_num_imprecise_acc = 0
 
-    return tl.tensor(builder.create_dot(lhs.handle, rhs.handle, acc_handle, allow_tf32, max_num_imprecise_acc), ret_ty)
+    return tl.tensor(builder.create_dot(lhs.handle, rhs.handle, acc_handle, f32_backend, max_num_imprecise_acc), ret_ty)
 
 
 # ===----------------------------------------------------------------------===//

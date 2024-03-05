@@ -1393,7 +1393,7 @@ def expand_dims(input, axis, _builder=None):
 
 
 @builtin
-def dot(input, other, acc=None, allow_tf32=True, max_num_imprecise_acc=None, out_dtype=float32, _builder=None):
+def dot(input, other, acc=None, f32_backend=None, max_num_imprecise_acc=None, out_dtype=float32, _builder=None):
     """
     Returns the matrix product of two blocks.
 
@@ -1404,10 +1404,10 @@ def dot(input, other, acc=None, allow_tf32=True, max_num_imprecise_acc=None, out
     :param other: The second tensor to be multiplied.
     :type other: 2D tensor of scalar-type in {:code:`float16`, :code:`bfloat16`, :code:`float32`}
     """
-    allow_tf32 = _constexpr_to_value(allow_tf32)
+    f32_backend = _constexpr_to_value(f32_backend)
     out_dtype = _constexpr_to_value(out_dtype)
     max_num_imprecise_acc = _constexpr_to_value(max_num_imprecise_acc)
-    return semantic.dot(input, other, acc, allow_tf32, max_num_imprecise_acc, out_dtype, _builder)
+    return semantic.dot(input, other, acc, f32_backend, max_num_imprecise_acc, out_dtype, _builder)
 
 
 # -----------------------

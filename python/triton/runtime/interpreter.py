@@ -314,7 +314,7 @@ class Builder:
     def create_trans(self, arg, perm):
         return TensorHandle(np.transpose(arg.data, perm), arg.dtype)
 
-    def create_dot(self, a, b, d, allow_tf32, max_num_imprecise_acc):
+    def create_dot(self, a, b, d, f32_backend, maxNumImpreciseAcc):
         return TensorHandle(np.dot(a.data, b.data) + d.data, d.dtype)
 
     def create_make_range(self, start, stop):
