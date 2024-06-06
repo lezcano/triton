@@ -59,15 +59,22 @@ if(NOT MLIR_DIR)
   set(MLIR_DIR ${LLVM_LIBRARY_DIR}/cmake/mlir)
 endif()
 
-# MLIR
+if(NOT CLANG_DIR)
+  set(CLANG_DIR ${LLVM_LIBRARY_DIR}/cmake/clang)
+endif()
+
+# MLIR & Clang
 find_package(MLIR REQUIRED CONFIG PATHS ${MLIR_DIR})
+find_package(Clang REQUIRED CONFIG PATHS ${CLANG_DIR})
 
 list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
 list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
+list(APPEND CMAKE_MODULE_PATH "${CLANG_CMAKE_DIR}")
 
 include(TableGen) # required by AddMLIR
 include(AddLLVM)
 include(AddMLIR)
+include(AddClang)
 
 # Utilities
 function(add_triton_object name)
@@ -108,6 +115,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror -Wno-covered-switch-default -fvi
 include_directories(".")
 include_directories(${MLIR_INCLUDE_DIRS})
 include_directories(${LLVM_INCLUDE_DIRS})
+include_directories(${CLANG_INCLUDE_DIRS})
 include_directories(${PROJECT_SOURCE_DIR}/include)
 include_directories(${PROJECT_BINARY_DIR}/include) # Tablegen'd files
 include_directories(${PROJECT_SOURCE_DIR}/third_party)
@@ -203,6 +211,11 @@ if(TRITON_BUILD_PYTHON_MODULE)
     # LLVMNVPTXAsmPrinter
     LLVMAMDGPUCodeGen
     LLVMAMDGPUAsmParser
+
+    # Clang
+    clangFrontend
+    clangTooling
+    clangCodeGen
 
   )
   if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64" OR # Linux arm64

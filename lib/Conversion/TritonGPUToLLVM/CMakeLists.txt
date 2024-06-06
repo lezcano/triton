@@ -22,6 +22,9 @@ add_triton_library(TritonGPUToLLVM
     TritonGPUConversionPassIncGen
 
     LINK_LIBS PUBLIC
+    clangFrontend
+    clangTooling
+    clangCodeGen
     MLIRIR
     MLIRPass
     MLIRGPUDialect
