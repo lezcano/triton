@@ -177,7 +177,8 @@ def get_triton_cache_path():
 
 def get_thirdparty_packages():
     triton_cache_path = get_triton_cache_path()
-    packages = [get_pybind11_package_info(), get_llvm_package_info()]
+    llvm = get_llvm_package_info()
+    packages = [get_pybind11_package_info(), llvm]
     thirdparty_cmake_args = []
     for p in packages:
         package_root_dir = os.path.join(triton_cache_path, p.package)
@@ -202,6 +203,18 @@ def get_thirdparty_packages():
             thirdparty_cmake_args.append(f"-D{p.include_flag}={package_dir}/include")
         if p.lib_flag:
             thirdparty_cmake_args.append(f"-D{p.lib_flag}={package_dir}/lib")
+    if llvm.syspath_var_name in os.environ:
+        prefix = f"{os.environ[llvm.syspath_var_name]}/bin/"
+        thirdparty_cmake_args += [f"-DCMAKE_C_COMPILER={prefix}clang", f"-DCMAKE_CXX_COMPILER={prefix}clang++"]
+    else:
+        prefix = ""
+    if check_env_flag("TRITON_BUILD_WITH_CLANG_LLD"):
+        thirdparty_cmake_args += [
+            f"-DCMAKE_LINKER={prefix}lld",
+            f"-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld={prefix}lld",
+            f"-DCMAKE_MODULE_LINKER_FLAGS=-fuse-ld={prefix}lld",
+            f"-DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld={prefix}lld",
+        ]
     return thirdparty_cmake_args
 
 
@@ -333,16 +346,6 @@ class CMakeBuild(build_ext):
             cmake_args += ["-DCMAKE_BUILD_TYPE=" + cfg]
             max_jobs = os.getenv("MAX_JOBS", str(2 * os.cpu_count()))
             build_args += ['-j' + max_jobs]
-
-        if check_env_flag("TRITON_BUILD_WITH_CLANG_LLD"):
-            cmake_args += [
-                "-DCMAKE_C_COMPILER=clang",
-                "-DCMAKE_CXX_COMPILER=clang++",
-                "-DCMAKE_LINKER=lld",
-                "-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld",
-                "-DCMAKE_MODULE_LINKER_FLAGS=-fuse-ld=lld",
-                "-DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld",
-            ]
 
         # Note that asan doesn't work with binaries that use the GPU, so this is
         # only useful for tools like triton-opt that don't run code on the GPU.

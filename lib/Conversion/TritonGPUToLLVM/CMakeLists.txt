@@ -1,8 +1,13 @@
+get_property(translation_libs GLOBAL PROPERTY MLIR_TRANSLATION_LIBS)
+
+add_subdirectory(Templates)
+
 add_triton_library(TritonGPUToLLVM
     ConvertLayoutOpToLLVM/SharedToDotOperandFMA.cpp
     DotOpToLLVM/FMA.cpp
     TypeConverter.cpp
     Utility.cpp
+    CompileUtils.cpp
     ElementwiseOpToLLVM.cpp
     MemoryOpToLLVM.cpp
     AssertOpToLLVM.cpp
@@ -22,10 +27,10 @@ add_triton_library(TritonGPUToLLVM
     TritonGPUConversionPassIncGen
 
     LINK_LIBS PUBLIC
-    clangFrontend
-    clangTooling
-    clangCodeGen
+    ${translation_libs}
+    LLVMSupport
     MLIRIR
+    MLIRTargetLLVMIRImport
     MLIRPass
     MLIRGPUDialect
     MLIRGPUToNVVMTransforms
@@ -37,4 +42,5 @@ add_triton_library(TritonGPUToLLVM
     TritonGPUTransforms
     TritonNvidiaGPUTransforms
     NVGPUIR
+    Templates
 )

@@ -1,8 +1,11 @@
 #include "ReduceScanCommon.h"
 #include "mlir/Dialect/LLVMIR/NVVMDialect.h"
+#include "triton/Conversion/TritonGPUToLLVM/CompileUtils.h"
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "llvm/IR/DerivedTypes.h"
+#include <iostream>
 
 using namespace mlir;
 using namespace mlir::triton;
@@ -31,6 +34,52 @@ public:
     Location loc = op->getLoc();
 
     auto srcValues = unpackInputs(loc, op, adaptor, rewriter);
+
+    Block *block = &(*op.getCombineOp().begin());
+    Operation *reduceOp = block->getTerminator()->getOperand(0).getDefiningOp();
+    bool isSum = reduceOp && reduceOp->getNumOperands() == 2 &&
+                 isa<arith::AddFOp>(reduceOp);
+    if (isSum) {
+      // TODO Hardcoding:
+      // Op == sum
+      // type == float
+      // BLOCK_SIZE == 32
+      // ELEMS_PER_THREAD == 4
+      // shmem size
+
+      std::cout << "Hello" << std::endl;
+      loadReduction(rewriter);
+
+      // Create types for the function call
+      auto types = op.getInputTypes();
+      assert(types.size() == 1);
+      assert(types[0].getElementType() == rewriter.getF32Type());
+      auto f32Type = types[0].getElementType();
+      auto f32PtrType = LLVM::PointerType::get(f32Type, 3);
+
+      // Assumes offsets don't actually depend on type
+      SmallVector<SmallVector<unsigned>> offset =
+          emitOffsetForLayout(helper.getSrcLayout(), types[0]);
+
+      // Group elements owned by this thread that need to be reduced together
+      std::map<SmallVector<unsigned>, SmallVector<SmallVector<Value>>> grouped;
+      for (auto [offset, value] : llvm::zip(offset, srcValues)) {
+        SmallVector<unsigned> key = std::move(offset);
+        key[op.getAxis()] = 0;
+        grouped[key].emplace_back(std::move(value));
+      }
+      assert(grouped.size() == 1);
+      const auto &vals = grouped.begin()->second;
+      assert(vals.size() == 4);
+
+      // Compute a shared memory base per operand.
+      auto smemShape = helper.getScratchConfig();
+
+      SmallVector<Value> smemBases =
+          getSmemBases(op, product<unsigned>(smemShape), rewriter);
+      assert(smemBases.size() == 1);
+    }
+
     std::map<SmallVector<unsigned>, SmallVector<Value>> accs;
     std::map<SmallVector<unsigned>, SmallVector<Value>> indices;
     // First reduce all the values along axis within each thread.
