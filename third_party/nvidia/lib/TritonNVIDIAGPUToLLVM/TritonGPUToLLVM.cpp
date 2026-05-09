@@ -6,12 +6,15 @@
 #include "mlir/Conversion/GPUToNVVM/GPUToNVVMPass.h"
 #include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
 #include "mlir/Conversion/UBToLLVM/UBToLLVM.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
-#include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/NVVMDialect.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/Passes.h"
 #include "triton/Analysis/Allocation.h"
 #include "triton/Analysis/AxisInfo.h"
@@ -80,6 +83,216 @@ public:
   }
 };
 
+static bool isConstantInt(Value value, int64_t expected) {
+  APInt constant;
+  return matchPattern(value, m_ConstantInt(&constant)) && constant == expected;
+}
+
+// Match:
+//   incr = index + 1
+//   rollover = incr == 2
+// and return `index`.
+static Value getModuloTwoCounterInput(Value condition) {
+  auto cmp = condition.getDefiningOp<arith::CmpIOp>();
+  if (!cmp || cmp.getPredicate() != arith::CmpIPredicate::eq)
+    return {};
+
+  Value incr;
+  if (isConstantInt(cmp.getLhs(), 2))
+    incr = cmp.getRhs();
+  else if (isConstantInt(cmp.getRhs(), 2))
+    incr = cmp.getLhs();
+  else
+    return {};
+
+  auto add = incr.getDefiningOp<arith::AddIOp>();
+  if (!add)
+    return {};
+  if (isConstantInt(add.getLhs(), 1))
+    return add.getRhs();
+  if (isConstantInt(add.getRhs(), 1))
+    return add.getLhs();
+  return {};
+}
+
+static bool isModuloTwoCounterUpdate(arith::SelectOp op, Value &input) {
+  input = getModuloTwoCounterInput(op.getCondition());
+  if (!input || !isConstantInt(op.getTrueValue(), 0))
+    return false;
+
+  auto add = op.getFalseValue().getDefiningOp<arith::AddIOp>();
+  if (!add)
+    return false;
+  return (add.getLhs() == input && isConstantInt(add.getRhs(), 1)) ||
+         (add.getRhs() == input && isConstantInt(add.getLhs(), 1));
+}
+
+static SmallVector<Value> getIncomingValues(BlockArgument arg) {
+  SmallVector<Value> incoming;
+  Block *block = arg.getOwner();
+  unsigned argNo = arg.getArgNumber();
+  for (Block *pred : block->getPredecessors()) {
+    Operation *terminator = pred->getTerminator();
+    if (auto br = dyn_cast<cf::BranchOp>(terminator)) {
+      if (br.getDest() == block && argNo < br.getDestOperands().size())
+        incoming.push_back(br.getDestOperands()[argNo]);
+      continue;
+    }
+    if (auto condBr = dyn_cast<cf::CondBranchOp>(terminator)) {
+      if (condBr.getTrueDest() == block &&
+          argNo < condBr.getTrueDestOperands().size())
+        incoming.push_back(condBr.getTrueDestOperands()[argNo]);
+      if (condBr.getFalseDest() == block &&
+          argNo < condBr.getFalseDestOperands().size())
+        incoming.push_back(condBr.getFalseDestOperands()[argNo]);
+    }
+  }
+  return incoming;
+}
+
+static bool collectZeroOrOneDependencies(Value value,
+                                         SmallVectorImpl<Value> &deps) {
+  if (isConstantInt(value, 0) || isConstantInt(value, 1))
+    return true;
+
+  if (auto xorOp = value.getDefiningOp<arith::XOrIOp>()) {
+    if (isConstantInt(xorOp.getLhs(), 1))
+      return collectZeroOrOneDependencies(xorOp.getRhs(), deps);
+    if (isConstantInt(xorOp.getRhs(), 1))
+      return collectZeroOrOneDependencies(xorOp.getLhs(), deps);
+    return false;
+  }
+
+  if (auto select = value.getDefiningOp<arith::SelectOp>()) {
+    Value input;
+    if (isModuloTwoCounterUpdate(select, input))
+      return collectZeroOrOneDependencies(input, deps);
+    return collectZeroOrOneDependencies(select.getTrueValue(), deps) &&
+           collectZeroOrOneDependencies(select.getFalseValue(), deps);
+  }
+
+  auto arg = dyn_cast<BlockArgument>(value);
+  if (!arg)
+    return false;
+  if (!llvm::is_contained(deps, value))
+    deps.push_back(value);
+  return true;
+}
+
+static bool isKnownZeroOrOne(Value value) {
+  SmallVector<Value> roots;
+  if (!collectZeroOrOneDependencies(value, roots))
+    return false;
+  if (roots.empty())
+    return true;
+
+  DenseSet<Value> inGroup;
+  SmallVector<Value> group;
+  auto addToGroup = [&](Value dependency) {
+    if (inGroup.insert(dependency).second)
+      group.push_back(dependency);
+  };
+  for (Value root : roots)
+    addToGroup(root);
+
+  DenseMap<Value, SmallVector<SmallVector<Value>>> incomingDeps;
+  for (size_t i = 0; i < group.size(); ++i) {
+    auto arg = cast<BlockArgument>(group[i]);
+    SmallVector<Value> incoming = getIncomingValues(arg);
+    if (incoming.empty())
+      return false;
+
+    auto &depsByEdge = incomingDeps[arg];
+    for (Value incomingValue : incoming) {
+      SmallVector<Value> deps;
+      if (!collectZeroOrOneDependencies(incomingValue, deps))
+        return false;
+      for (Value dep : deps)
+        addToGroup(dep);
+      depsByEdge.push_back(std::move(deps));
+    }
+  }
+
+  // Every one-bit recurrence group must be reachable from a non-recursive
+  // base.  This proves mutually recursive block arguments without accepting an
+  // uninitialized cycle.
+  DenseSet<Value> reached;
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (Value arg : group) {
+      if (reached.contains(arg))
+        continue;
+      bool hasReachedIncoming =
+          llvm::any_of(incomingDeps[arg], [&](ArrayRef<Value> deps) {
+            return llvm::all_of(
+                deps, [&](Value dep) { return reached.contains(dep); });
+          });
+      if (hasReachedIncoming) {
+        reached.insert(arg);
+        changed = true;
+      }
+    }
+  }
+  return llvm::all_of(group, [&](Value arg) { return reached.contains(arg); });
+}
+
+class FoldModuloTwoCounterSelect : public OpRewritePattern<arith::SelectOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(arith::SelectOp op,
+                                PatternRewriter &rewriter) const override {
+    Value input;
+    if (!isModuloTwoCounterUpdate(op, input) || !isKnownZeroOrOne(input))
+      return failure();
+    Value one = arith::ConstantIntOp::create(rewriter, op.getLoc(), 1, 32);
+    rewriter.replaceOpWithNewOp<arith::XOrIOp>(op, input, one);
+    return success();
+  }
+};
+
+class FoldModuloTwoPhaseSelect : public OpRewritePattern<arith::SelectOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(arith::SelectOp op,
+                                PatternRewriter &rewriter) const override {
+    Value input = getModuloTwoCounterInput(op.getCondition());
+    if (!input || !isKnownZeroOrOne(input))
+      return failure();
+
+    auto xorOp = op.getTrueValue().getDefiningOp<arith::XOrIOp>();
+    if (!xorOp)
+      return failure();
+    Value phase = op.getFalseValue();
+    if (!((xorOp.getLhs() == phase && isConstantInt(xorOp.getRhs(), 1)) ||
+          (xorOp.getRhs() == phase && isConstantInt(xorOp.getLhs(), 1))))
+      return failure();
+
+    Operation *insertBefore = nullptr;
+    for (Operation *user : op.getCondition().getUsers()) {
+      auto counterUpdate = dyn_cast<arith::SelectOp>(user);
+      Value counterInput;
+      if (!counterUpdate || counterUpdate == op ||
+          !isModuloTwoCounterUpdate(counterUpdate, counterInput) ||
+          counterInput != input)
+        continue;
+      if (counterUpdate->getBlock() == op->getBlock() &&
+          counterUpdate->isBeforeInBlock(op)) {
+        insertBefore = counterUpdate;
+        break;
+      }
+    }
+
+    OpBuilder::InsertionGuard guard(rewriter);
+    if (insertBefore)
+      rewriter.setInsertionPoint(insertBefore);
+    Value replacement =
+        arith::XOrIOp::create(rewriter, op.getLoc(), phase, input);
+    rewriter.replaceOp(op, replacement);
+    return success();
+  }
+};
+
 struct ConvertTritonGPUToLLVM
     : public triton::impl::ConvertTritonGPUToLLVMBase<ConvertTritonGPUToLLVM> {
   using ConvertTritonGPUToLLVMBase::ConvertTritonGPUToLLVMBase;
@@ -145,6 +358,15 @@ struct ConvertTritonGPUToLLVM
     // because the call op has to know the shared memory base address of each
     // function
     initSharedMemory(typeConverter);
+
+    RewritePatternSet moduloTwoPhasePatterns(context);
+    moduloTwoPhasePatterns.add<FoldModuloTwoPhaseSelect>(context);
+    (void)applyPatternsGreedily(mod, std::move(moduloTwoPhasePatterns));
+
+    RewritePatternSet moduloTwoCounterPatterns(context);
+    moduloTwoCounterPatterns.add<FoldModuloTwoCounterSelect>(context);
+    (void)applyPatternsGreedily(mod, std::move(moduloTwoCounterPatterns));
+
     ModuleAxisInfoAnalysis axisInfoAnalysis(mod);
 
     RewritePatternSet patterns(context);

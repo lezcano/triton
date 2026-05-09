@@ -616,3 +616,49 @@ module attributes {"ttg.num-ctas" = 2 : i32, "ttg.num-warps" = 4 : i32, "ttg.tot
     llvm.return
   }
 }
+
+// -----
+
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32} {
+  // CHECK-LABEL: @modulo_two_counter_update
+  tt.func private @modulo_two_counter_update(%limit: i32) -> (i32, i32) {
+    %c0 = arith.constant 0 : i32
+    %c1 = arith.constant 1 : i32
+    %c2 = arith.constant 2 : i32
+    cf.br ^bb1(%c0, %c0, %c0 : i32, i32, i32)
+  ^bb1(%iv: i32, %index: i32, %phase: i32):
+    %keep_going = arith.cmpi slt, %iv, %limit : i32
+    cf.cond_br %keep_going, ^bb2, ^bb3(%index, %phase : i32, i32)
+  ^bb2:
+    %incr = arith.addi %index, %c1 : i32
+    %rollover = arith.cmpi eq, %incr, %c2 : i32
+    %next_index = arith.select %rollover, %c0, %incr : i32
+    %phase_xor = arith.xori %phase, %c1 : i32
+    %next_phase = arith.select %rollover, %phase_xor, %phase : i32
+    %next_iv = arith.addi %iv, %c1 : i32
+    // CHECK: llvm.xor %{{.*}}, %{{.*}} : i32
+    // CHECK-NEXT: llvm.xor %{{.*}}, %{{.*}} : i32
+    // CHECK-NOT: llvm.select
+    cf.br ^bb1(%next_iv, %next_index, %next_phase : i32, i32, i32)
+  ^bb3(%out_index: i32, %out_phase: i32):
+    tt.return %out_index, %out_phase : i32, i32
+  }
+}
+
+// -----
+
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32} {
+  // CHECK-LABEL: @modulo_two_counter_unproven
+  tt.func private @modulo_two_counter_unproven(%index: i32, %phase: i32) -> (i32, i32) {
+    %c0 = arith.constant 0 : i32
+    %c1 = arith.constant 1 : i32
+    %c2 = arith.constant 2 : i32
+    %incr = arith.addi %index, %c1 : i32
+    %rollover = arith.cmpi eq, %incr, %c2 : i32
+    %next_index = arith.select %rollover, %c0, %incr : i32
+    %phase_xor = arith.xori %phase, %c1 : i32
+    %next_phase = arith.select %rollover, %phase_xor, %phase : i32
+    // CHECK-COUNT-2: llvm.select
+    tt.return %next_index, %next_phase : i32, i32
+  }
+}

@@ -1,0 +1,44 @@
+Reproducer:
+  PYTHONPATH=python pytest -s --tb=short \
+    'python/examples/gluon/02-conv-wgrad.py::test_op[conv2d_wgrad_fixed-1-128-64-64-128-1-1-1-0]'
+
+Target:
+  NVIDIA GB300
+
+Issue:
+  The two-stage barrier counter update from Counter.next lowered each wraparound
+  as add + compare + two selects + xor, even when the counter was proven to stay
+  in {0, 1}.
+
+Before PTX:
+  add.s32 %r869, %r1102, 1;
+  setp.eq.b32 %p58, %r869, 2;
+  selp.b32 %r1102, 0, %r869, %p58;
+  selp.b32 %r870, 1, 0, %p58;
+  xor.b32 %r1101, %r1101, %r870;
+
+After PTX:
+  xor.b32 %r1101, %r1101, %r1102;
+  xor.b32 %r1102, %r1102, 1;
+
+Before SASS:
+  UISETP.NE.U32.AND UP1, UPT, UR12, 0x2, UPT;
+  USEL UR7, URZ, 0x1, UP1;
+  ULOP3.LUT UR4, UR4, UR7, URZ, 0x3c, !UPT;
+  USEL UR7, UR12, URZ, UP1;
+
+After SASS:
+  ULOP3.LUT UR5, UR5, UR6, URZ, 0x3c, !UPT;
+  ULOP3.LUT UR6, UR6, 0x1, URZ, 0x3c, !UPT;
+
+Effect:
+  The checked-in wgrad specialization has 5 such updates.  Final SASS for
+  conv2d_wgrad_kernel drops from 2424 to 2400 instructions.
+
+Proof:
+  Counter.create initializes index to 0.  For a two-stage counter, the only
+  transition is 0 -> 1 or 1 -> 0, so the index remains in {0, 1}.  Therefore
+  rollover = (index + 1 == 2) is exactly the old index, next_index is
+  index ^ 1, and next_phase is phase ^ index.  The lowering only applies after
+  proving that one-bit invariant from CFG incoming values; unconstrained inputs
+  keep the original selects.
