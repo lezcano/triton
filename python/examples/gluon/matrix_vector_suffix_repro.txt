@@ -1,0 +1,34 @@
+Reproducer used during analysis:
+  the checked-in MoE specialization in
+  `python/examples/gluon/05-moe-bmm1-fused-gather.py`:
+  `test_op[128-c0]`
+
+Target:
+  NVIDIA GB300
+
+Issue:
+  `matrixVectorProd` masked every single shifted term before applying the
+  shift.  When a right-shift term keeps the full high suffix of the known
+  LinearLayout input domain, that mask is redundant: the packed layout input
+  already has no bits above the domain width, and the right shift discards the
+  low prefix outside the suffix.
+
+Before PTX:
+  and.b32 %r30, %r29, 124;
+  bfe.u32 %r31, %r29, 2, 5;
+
+After PTX:
+  shr.u32 %r30, %r29, 2;
+
+Correctness:
+  `matrixVectorProd` packs exactly `nCol` input bits into `x`.  For a negative
+  shift `s`, if the selected mask is precisely the surviving domain suffix
+  `((1 << nCol) - 1) & ~((1 << s) - 1)`, then every bit outside that suffix is
+  either already zero above the domain or discarded below it.  Therefore
+  `(x & suffix) >> s == x >> s` bit for bit.
+
+Effect:
+  Hand-editing the emitted PTX first changed the checked-in `_topk_forward`
+  kernel from a bitfield extract to a plain right shift.  Reassembling with
+  `ptxas-blackwell` reduced non-padding SASS instructions from 747 to 745 and
+  moved the final `EXIT` from `0x2ea0` to `0x2e80`.

@@ -306,6 +306,12 @@ Value matrixVectorProd(TritonLLVMOpBuilder &b, const LinearLayout &A, Value x) {
     Value masked = b.and_(x, b.i32_val(term.mask));
     Value shifted;
     if (shifts.size() == 1) {
+      if (term.shift < 0) {
+        auto suffixMask = llvm::maskTrailingOnes<uint32_t>(nCol) &
+                          ~llvm::maskTrailingOnes<uint32_t>(-term.shift);
+        if (term.mask == suffixMask)
+          masked = x;
+      }
       shifted = term.shift >= 0 ? Value(b.shl(masked, b.i32_val(term.shift)))
                                 : Value(b.lshr(masked, b.i32_val(-term.shift)));
     } else {
