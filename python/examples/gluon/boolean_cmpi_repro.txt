@@ -1,0 +1,69 @@
+Reproducer:
+  python -m pytest -q -s --tb=short \
+    'python/examples/gluon/05-moe-bmm1-fused-gather.py::test_op[128-c0]'
+
+Target:
+  NVIDIA GB300
+
+Issue:
+  `_bitmatrix_metadata_compute_stage2` and `_topk_forward` compare booleans
+  spelled as `arith.extui %pred : i1 to i32` against integers that are provably
+  either zero or one. The generic lowering materialized the extended predicate
+  as an integer with `selp 1, 0` and then compared the two integers, even though
+  the comparison is exactly expressible in predicate space.
+
+Before PTX:
+  setp.gt.u32  %p20, %r66, %r67;
+  xor.b32      %r68, %r24, %r32;
+  selp.b32     %r69, 1, 0, %p20;
+  setp.eq.b32  %p21, %r68, %r69;
+  selp.b32     %r70, %r66, %r67, %p21;
+
+After PTX:
+  setp.gt.u32  %p25, %r48, %r49;
+  setp.ne.b32  %p26, %r24, %r20;
+  xor.pred     %p27, %p26, %p25;
+  selp.b32     %r50, %r49, %r48, %p27;
+
+Before SASS:
+  ISETP.GT.U32.AND P0, PT, R7, R4, PT;
+  SEL R9, RZ, 0x1, !P0;
+  ISETP.NE.U32.AND P0, PT, R8, R9, PT;
+  SEL R6, R7, R4, !P0;
+
+After SASS:
+  ISETP.GT.U32.AND P0, PT, R6, R7, PT;
+  ISETP.NE.U32.XOR P0, PT, R3, R2, P0;
+  SEL R7, R7, R6, P0;
+
+Top-k before PTX:
+  setp.gt.u32  %p17, %r117, %r116;
+  selp.b32     %r118, 1, 0, %p17;
+  setp.eq.b32  %p23, %r102, %r118;
+
+Top-k after PTX:
+  setp.gt.u32  %p20, %r109, %r110;
+  xor.pred     %p21, %p20, %p17;
+
+Top-k before SASS:
+  ISETP.GT.U32.AND P0, PT, R5, R24, PT;
+  SEL R21, RZ, 0x1, !P0;
+  ISETP.NE.U32.AND P4, PT, R18, R21, PT;
+
+Top-k after SASS:
+  ISETP.GT.U32.XOR P4, PT, R26, R5, !P2;
+
+Why this is exact:
+  If `b` is a predicate and `x` is known to be in `{0, 1}`, then
+  `zext(b) == x` is exactly `(x == 0) xor b`, and `zext(b) != x` is exactly
+  `(x != 0) xor b`. This changes only the boolean representation; it does not
+  change integer or floating-point numerics.
+
+Effect:
+  On the checked-in MoE repro, `_bitmatrix_metadata_compute_stage2` drops from
+  371 to 331 SASS lines, cubin size drops from 35368 to 33488 bytes, the 23
+  `selp.b32 ..., 1, 0, ...` predicate materializations disappear, and the final
+  SASS uses 23 `ISETP.NE.U32.XOR` instructions instead. The same lowering also
+  improves `_topk_forward`: SASS lines drop from 827 to 763 and cubin size drops
+  from 68664 to 65544 bytes, with 32 `selp.b32 ..., 1, 0, ...`
+  materializations removed from PTX.

@@ -67,12 +67,59 @@ struct CmpIOpConversion
   using Base::Base;
   using Adaptor = typename Base::OpAdaptor;
 
+  static bool isKnownZeroOrOne(Value value) {
+    if (auto extui = value.getDefiningOp<arith::ExtUIOp>())
+      return getElementTypeOrSelf(extui.getIn()).isInteger(1);
+    if (auto range = value.getDefiningOp<MakeRangeOp>())
+      return range.getStartAttr().getInt() >= 0 &&
+             range.getEndAttr().getInt() <= 2;
+    if (auto reshape = value.getDefiningOp<ReshapeOp>())
+      return isKnownZeroOrOne(reshape.getSrc());
+    if (auto broadcast = value.getDefiningOp<BroadcastOp>())
+      return isKnownZeroOrOne(broadcast.getSrc());
+    if (auto splat = value.getDefiningOp<SplatOp>())
+      return isKnownZeroOrOne(splat.getSrc());
+    if (auto expand = value.getDefiningOp<ExpandDimsOp>())
+      return isKnownZeroOrOne(expand.getSrc());
+    if (auto xorOp = value.getDefiningOp<arith::XOrIOp>())
+      return isKnownZeroOrOne(xorOp.getLhs()) &&
+             isKnownZeroOrOne(xorOp.getRhs());
+    return false;
+  }
+
   // An interface to support variant DestOp builder.
-  SmallVector<LLVM::ICmpOp> createDestOps(arith::CmpIOp op, OpAdaptor adaptor,
-                                          ConversionPatternRewriter &rewriter,
-                                          Type elemTy,
-                                          MultipleOperandsRange operands,
-                                          Location loc) const {
+  SmallVector<Value> createDestOps(arith::CmpIOp op, OpAdaptor adaptor,
+                                   ConversionPatternRewriter &rewriter,
+                                   Type elemTy, MultipleOperandsRange operands,
+                                   Location loc) const {
+    if (op.getPredicate() == arith::CmpIPredicate::eq ||
+        op.getPredicate() == arith::CmpIPredicate::ne) {
+      auto lhsExt = op.getLhs().getDefiningOp<arith::ExtUIOp>();
+      auto rhsExt = op.getRhs().getDefiningOp<arith::ExtUIOp>();
+      bool lhsIsBoolExt =
+          lhsExt && getElementTypeOrSelf(lhsExt.getIn()).isInteger(1);
+      bool rhsIsBoolExt =
+          rhsExt && getElementTypeOrSelf(rhsExt.getIn()).isInteger(1);
+      int extIdx = lhsIsBoolExt ? 0 : rhsIsBoolExt ? 1 : -1;
+      int bitIdx = extIdx == 0 ? 1 : 0;
+      if (extIdx >= 0 &&
+          isKnownZeroOrOne(extIdx == 0 ? op.getRhs() : op.getLhs())) {
+        // Keep boolean compares in predicate space instead of materializing the
+        // extended predicate as an integer 0/1 before the comparison.
+        auto b = TritonLLVMOpBuilder(loc, rewriter);
+        Type intTy = operands[0][extIdx].getType();
+        Value zero = LLVM::createLLVMIntegerConstant(
+            rewriter, loc, intTy.getIntOrFloatBitWidth(), 0);
+        Value extIsOne = LLVM::ICmpOp::create(
+            rewriter, loc, LLVM::ICmpPredicate::ne, operands[0][extIdx], zero);
+        auto bitPred = op.getPredicate() == arith::CmpIPredicate::eq
+                           ? LLVM::ICmpPredicate::eq
+                           : LLVM::ICmpPredicate::ne;
+        Value bitCmp = LLVM::ICmpOp::create(rewriter, loc, bitPred,
+                                            operands[0][bitIdx], zero);
+        return {b.xor_(bitCmp, extIsOne)};
+      }
+    }
     return {LLVM::ICmpOp::create(rewriter, loc, elemTy,
                                  ArithCmpIPredicateToLLVM(op.getPredicate()),
                                  operands[0][0], operands[0][1])};

@@ -662,3 +662,23 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32} {
     tt.return %next_index, %next_phase : i32, i32
   }
 }
+
+// -----
+
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32} {
+  // CHECK-LABEL: @cmpi_bool_ext_with_boolean_int
+  // CHECK: %[[RHS:.+]] = llvm.xor %{{.*}}, %{{.*}} : i32
+  // CHECK: %[[ZERO:.+]] = llvm.mlir.constant(0 : i32) : i32
+  // CHECK: %[[EXT_IS_ONE:.+]] = llvm.icmp "ne" %{{.*}}, %[[ZERO]] : i32
+  // CHECK: %[[BIT_CMP:.+]] = llvm.icmp "eq" %[[RHS]], %[[ZERO]] : i32
+  // CHECK: llvm.xor %[[BIT_CMP]], %[[EXT_IS_ONE]] : i1
+  tt.func private @cmpi_bool_ext_with_boolean_int(%arg0: i1, %arg1: i1,
+                                                  %arg2: i1) -> i1 {
+    %lhs = arith.extui %arg0 : i1 to i32
+    %rhs0 = arith.extui %arg1 : i1 to i32
+    %rhs1 = arith.extui %arg2 : i1 to i32
+    %rhs = arith.xori %rhs0, %rhs1 : i32
+    %cmp = arith.cmpi eq, %lhs, %rhs : i32
+    tt.return %cmp : i1
+  }
+}
