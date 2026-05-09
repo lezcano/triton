@@ -189,22 +189,23 @@ Value matrixVectorProd(TritonLLVMOpBuilder &b, const LinearLayout &A, Value x) {
     }
   }
 
-  // A run of shifted multi-bit bases over globally unique rows is exactly an
-  // integer multiply. Consume those runs first; ptxas lowers them better than
-  // rebuilding the same value from separate diagonals.
+  // A run of shifted multi-bit bases is exactly an integer multiply when the
+  // shifted copies are pairwise disjoint. Consume those runs first; ptxas
+  // lowers them better than rebuilding the same value from separate diagonals.
   for (int c = 0; c < nCol;) {
     int32_t seed = matrix[c];
     uint32_t seedBits = static_cast<uint32_t>(seed);
-    if (llvm::popcount(seedBits) <= 1 || (seedBits & rowsUnique) != seedBits) {
+    if (llvm::popcount(seedBits) <= 1) {
       ++c;
       continue;
     }
 
     int run = 1;
+    uint32_t runOutputBits = seedBits;
     while (c + run < nCol && run < 32 &&
            static_cast<uint32_t>(matrix[c + run]) == (seedBits << run) &&
-           (static_cast<uint32_t>(matrix[c + run]) & rowsUnique) ==
-               static_cast<uint32_t>(matrix[c + run])) {
+           (runOutputBits & static_cast<uint32_t>(matrix[c + run])) == 0) {
+      runOutputBits |= static_cast<uint32_t>(matrix[c + run]);
       ++run;
     }
     if (run == 1) {
@@ -216,7 +217,11 @@ Value matrixVectorProd(TritonLLVMOpBuilder &b, const LinearLayout &A, Value x) {
     Value slice = b.and_(x, b.i32_val(mask));
     if (c != 0)
       slice = b.lshr(slice, b.i32_val(c));
-    ors.push_back(b.mul(slice, b.i32_val(seed)));
+    Value runValue = b.mul(slice, b.i32_val(seed));
+    if ((runOutputBits & rowsUnique) == runOutputBits)
+      ors.push_back(runValue);
+    else
+      xors.push_back(runValue);
     for (int i = 0; i < run; ++i)
       matrix[c + i] = 0;
     c += run;

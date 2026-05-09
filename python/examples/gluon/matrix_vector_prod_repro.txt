@@ -236,6 +236,37 @@ After SASS:
   already-normalized 0/1 spelling available for other users and avoids the
   signed-mask form.
 
+MoE pairwise-disjoint shifted multi-bit run:
+  The same checked-in MoE specialization also launches `_sum_bitmatrix_rows`,
+  whose shared-load address layout has basis columns:
+    160, 320, 4, 8, 16, 32, 64, 0
+  The first two columns are shifted copies of one multi-bit seed. Their output
+  rows are disjoint from each other, but not globally unique because the later
+  one-hot columns also touch rows five and six.
+
+Hand-mutated equivalent PTX before combining the run:
+  and.b32    %r93, %r19, 1;
+  mul.lo.s32 %r94, %r93, 160;
+  and.b32    %r95, %r19, 2;
+  shr.u32    %r96, %r95, 1;
+  mul.lo.s32 %r97, %r96, 320;
+  xor.b32    %r98, %r94, %r97;
+  xor.b32    %r99, %r98, %r62;
+
+After source lowering:
+  mul.lo.s32 %r72, %r19, 160;
+  xor.b32    %r73, %r72, %r62;
+
+After SASS:
+  IMAD     R7, R5, 0xa0, RZ;
+  LOP3.LUT R13, R7, 0x7c, R0, 0x78, !PT;
+
+  Here `%r19` is the two-bit masked slice. The selected seed outputs are
+  `160 = (1 << 5) | (1 << 7)` and `320 = 160 << 1`, so for every slice value
+  `(slice0 ? 160 : 0) xor (slice1 ? 320 : 0)` is exactly `slice * 160`.
+  Because rows five and six are shared with later basis columns, the combined
+  run is still XORed with the remaining contribution instead of ORed into it.
+
 Effect:
   Hand-editing the emitted PTX first and assembling it with CUDA 13.1 `ptxas`
   reduced final SASS instruction lines from 10911 to 10909 for the dgrad
@@ -249,6 +280,7 @@ Effect:
   lines from 800 to 784 and cubin size from 37120 to 36480 bytes. For the
   explicit multi-bit-column case, the source-replayable lowering reduced the
   current checked-in MoE stage2 SASS from 331 to 323 lines and cubin size from
-  33488 to 33040 bytes. Compiling the checked-in specializations from source
-  after the lowering change emits the same multiply and `brev` forms in PTX and
-  SASS.
+  33488 to 33040 bytes. For the pairwise-disjoint multi-bit run, the exact
+  PTX mutation reduced `_sum_bitmatrix_rows` SASS from 144 to 136 lines.
+  Compiling the checked-in specializations from source after the lowering
+  change emits the same multiply and `brev` forms in PTX and SASS.
