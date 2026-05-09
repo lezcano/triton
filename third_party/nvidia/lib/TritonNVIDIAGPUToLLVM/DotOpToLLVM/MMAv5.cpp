@@ -56,33 +56,6 @@ std::optional<int> getStaticTmemOffset(Value value) {
   return std::nullopt;
 }
 
-// Recover local_alloc offsets before warp-specialization captures hide the
-// original shared allocation from the LLVM lowering.
-std::optional<int64_t> getStaticSharedOffset(Value value) {
-  if (auto alloc = value.getDefiningOp<LocalAllocOp>()) {
-    if (auto offset = alloc->getAttrOfType<IntegerAttr>("allocation.offset"))
-      return offset.getInt();
-    return std::nullopt;
-  }
-  if (auto index = value.getDefiningOp<MemDescIndexOp>())
-    return getStaticSharedOffset(index.getSrc());
-  if (auto trans = value.getDefiningOp<MemDescTransOp>())
-    return getStaticSharedOffset(trans.getSrc());
-  if (auto reshape = value.getDefiningOp<MemDescReshapeOp>())
-    return getStaticSharedOffset(reshape.getSrc());
-  if (auto subslice = value.getDefiningOp<MemDescSubsliceOp>())
-    return getStaticSharedOffset(subslice.getSrc());
-  if (auto reinterpret = value.getDefiningOp<MemDescReinterpretOp>())
-    return getStaticSharedOffset(reinterpret.getSrc());
-  if (auto arg = dyn_cast<BlockArgument>(value)) {
-    if (auto partitions =
-            dyn_cast<WarpSpecializePartitionsOp>(arg.getOwner()->getParentOp()))
-      return getStaticSharedOffset(
-          partitions.getExplicitCaptures()[arg.getArgNumber()]);
-  }
-  return std::nullopt;
-}
-
 // Helper class to load tensor memory following MMAv5 layout.
 class DotOpMmaV5TmemLoader : public DotOpMmaMemLoader {
 public:

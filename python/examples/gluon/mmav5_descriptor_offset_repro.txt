@@ -114,3 +114,35 @@ Effect:
   for fprop and from 1444 to 1436 for block-scale. Source replay after the
   MMAv5 source-offset recovery emits the same descriptor-unit form in both
   checked-in kernels.
+
+Additional TMEM copy descriptor recovery:
+  checked-in MoE specialization:
+    `python/examples/gluon/05-moe-bmm1-fused-gather.py`:
+    `test_op[128-c0]`
+
+  `ttng.tmem_copy` uses the same shared-memory descriptor encoding as MMAv5
+  MMA, but its lowering still passed the full byte pointer to the descriptor
+  builder. In the real `ws_matmul_kernel`, that left the static source-buffer
+  offset on the wrong side of the 128-bit-unit extraction.
+
+Before PTX:
+  add.s32 %r49, %r48, 108544;
+  bfe.u32 %r51, %r49, 4, 14;
+
+After PTX:
+  shr.u32 %r51, %r48, 4;
+  add.s32 %r51, %r51, 6784;
+  and.b32 %r51, %r51, 16383;
+
+Reasoning:
+  This reuses the exact descriptor-unit identity proven above. The lowering
+  subtracts only the known `local_alloc` byte offset from the lowered source
+  base, preserves the dynamic stage offset, and passes the static part to the
+  existing descriptor builder as `108544 / 16 == 6784`.
+
+Effect:
+  Hand-editing the emitted `ws_matmul_kernel` PTX first and assembling with
+  `ptxas-blackwell` kept 1240 scheduled SASS slots but reduced useful SASS
+  instructions from 1203 to 1201. Recompiling the same saved TTGIR from source
+  after extending the lowering emits the same PTX form and the same final SASS
+  counts.

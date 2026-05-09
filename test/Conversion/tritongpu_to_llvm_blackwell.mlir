@@ -472,6 +472,17 @@ tt.func public @tmem_copy_2d_slice(%src: !ttg.memdesc<128x32xi8, #shared2, #ttg.
   tt.return
 }
 
+// CHECK-LABEL: @tmem_copy_2d_static_offset
+tt.func public @tmem_copy_2d_static_offset(%dst: !ttg.memdesc<128x32xi8, #tmem_scales, #ttng.tensor_memory, mutable>) {
+  // CHECK: [[NEG_OFFSET:%.*]] = llvm.mlir.constant(-256 : i32) : i32
+  // CHECK: llvm.getelementptr %{{.*}}[[NEG_OFFSET]]
+  // CHECK: [[STATIC_UNITS:%.*]] = llvm.mlir.constant(16 : i32) : i32
+  // CHECK: llvm.add %{{.*}}, [[STATIC_UNITS]]
+  %src = ttg.local_alloc {allocation.offset = 256 : i32} : () -> !ttg.memdesc<128x32xi8, #shared, #ttg.shared_memory, mutable>
+  ttng.tmem_copy %src, %dst : !ttg.memdesc<128x32xi8, #shared, #ttg.shared_memory, mutable>, !ttg.memdesc<128x32xi8, #tmem_scales, #ttng.tensor_memory, mutable>
+  tt.return
+}
+
 }
 
 // -----

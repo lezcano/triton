@@ -690,11 +690,9 @@ static LogicalResult copySharedToTmem(ConversionPatternRewriter &rewriter,
 
   auto bitwidth = srcTy.getElementType().getIntOrFloatBitWidth();
   auto atom = getTMemCopyAtom(cvt, bitwidth);
-  // Get shmem ptr
-  Type elemTy = typeConverter->convertType(srcTy.getElementType());
-  auto smemObj =
-      LLVM::getSharedMemoryObjectFromStruct(loc, src, elemTy, rewriter);
-  auto smemBase = smemObj.getShmemAffineBase(loc, rewriter, srcTy);
+  auto [smemBase, staticByteOffset] =
+      getOffsetedBase(src, srcTy, typeConverter, rewriter, loc,
+                      getStaticSharedOffset(op.getSrc()));
 
   // We handle the multicast (the last 2 bits) after the descriptor
   // once we have access to the lbo/sbo
@@ -706,8 +704,9 @@ static LogicalResult copySharedToTmem(ConversionPatternRewriter &rewriter,
                                  {kBlock, cvt.getInDimSize(kBlock)}})
                      .sublayout({kRow, kCol}, to_vector(cvt.getOutDimNames()));
 
-  auto loader = DotOpMmaSmemLoader::build(loc, rewriter, cvtWarp, bitwidth,
-                                          smemBase, 0, instrShape, 0, 5);
+  auto loader =
+      DotOpMmaSmemLoader::build(loc, rewriter, cvtWarp, bitwidth, smemBase,
+                                staticByteOffset, instrShape, 0, 5);
   if (failed(loader)) {
     return op->emitOpError("failed to find valid tcgen05.copy layout from "
                            "shared memory descriptor ")

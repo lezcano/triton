@@ -346,6 +346,33 @@ private:
   }
 };
 
+// Recover local_alloc offsets before warp-specialization captures hide the
+// original shared allocation from the LLVM lowering.
+static std::optional<int64_t> getStaticSharedOffset(Value value) {
+  if (auto alloc = value.getDefiningOp<gpu::LocalAllocOp>()) {
+    if (auto offset = alloc->getAttrOfType<IntegerAttr>("allocation.offset"))
+      return offset.getInt();
+    return std::nullopt;
+  }
+  if (auto index = value.getDefiningOp<gpu::MemDescIndexOp>())
+    return getStaticSharedOffset(index.getSrc());
+  if (auto trans = value.getDefiningOp<gpu::MemDescTransOp>())
+    return getStaticSharedOffset(trans.getSrc());
+  if (auto reshape = value.getDefiningOp<gpu::MemDescReshapeOp>())
+    return getStaticSharedOffset(reshape.getSrc());
+  if (auto subslice = value.getDefiningOp<gpu::MemDescSubsliceOp>())
+    return getStaticSharedOffset(subslice.getSrc());
+  if (auto reinterpret = value.getDefiningOp<gpu::MemDescReinterpretOp>())
+    return getStaticSharedOffset(reinterpret.getSrc());
+  if (auto arg = dyn_cast<BlockArgument>(value)) {
+    if (auto partitions = dyn_cast<gpu::WarpSpecializePartitionsOp>(
+            arg.getOwner()->getParentOp()))
+      return getStaticSharedOffset(
+          partitions.getExplicitCaptures()[arg.getArgNumber()]);
+  }
+  return std::nullopt;
+}
+
 static std::pair<Value, int64_t>
 getOffsetedBase(Value v, gpu::MemDescType memDescTy,
                 const TypeConverter *typeConverter,
