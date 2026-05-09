@@ -197,12 +197,13 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
   auto mmaEncoding = cast<NvidiaMmaEncodingAttr>(dTensorTy.getEncoding());
   std::optional<SharedMemoryObject> smemObjA;
   Value baseA;
+  int64_t staticByteOffsetA = 0;
   if (aInShared) {
-    baseA = getOffsetedBase(loadedA, cast<MemDescType>(aTensorTy),
-                            typeConverter, rewriter, loc);
+    std::tie(baseA, staticByteOffsetA) = getOffsetedBase(
+        loadedA, cast<MemDescType>(aTensorTy), typeConverter, rewriter, loc);
   }
-  auto baseB = getOffsetedBase(loadedB, cast<MemDescType>(bTensorTy),
-                               typeConverter, rewriter, loc);
+  auto [baseB, staticByteOffsetB] = getOffsetedBase(
+      loadedB, cast<MemDescType>(bTensorTy), typeConverter, rewriter, loc);
   auto dShapePerCTA = getShapePerCTA(dTensorTy);
   auto instrMNK = mmaEncoding.getInstrShape();
   auto accSize = 2 * (instrMNK[1] / 4);
@@ -223,9 +224,9 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
   SmallVector<Value> structA;
   bool transA = false;
   if (aInShared) {
-    auto loader =
-        DotOpMmaSmemLoader::build(loc, rewriter, cast<MemDescType>(aTensorTy),
-                                  baseA, {M, K}, 0, 3, false, dTensorTy);
+    auto loader = DotOpMmaSmemLoader::build(
+        loc, rewriter, cast<MemDescType>(aTensorTy), baseA, staticByteOffsetA,
+        {M, K}, 0, 3, false, dTensorTy);
     if (failed(loader)) {
       return mlir::emitError(loc, "failed to find valid wgmma layout for "
                                   "operand A in shared memory ")
@@ -238,7 +239,8 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
     structA = unpackLLElements(loc, loadedA, rewriter);
   }
   auto bLoader = DotOpMmaSmemLoader::build(loc, rewriter, bTensorTy, baseB,
-                                           {K, N}, 1, 3, false, dTensorTy);
+                                           staticByteOffsetB, {K, N}, 1, 3,
+                                           false, dTensorTy);
   if (failed(bLoader)) {
     return mlir::emitError(loc, "failed to find valid wgmma layout for "
                                 "operand B in shared memory ")

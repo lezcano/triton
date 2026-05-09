@@ -57,8 +57,8 @@ public:
 
   static FailureOr<DotOpMmaSmemLoader>
   build(Location loc, RewriterBase &rewriter, gpu::MemDescType memTy,
-        Value smemBase, ArrayRef<unsigned> instrShape, unsigned MNdim,
-        int mmaVersion, bool isFp4 = false,
+        Value smemBase, int64_t staticByteOffset, ArrayRef<unsigned> instrShape,
+        unsigned MNdim, int mmaVersion, bool isFp4 = false,
         std::optional<RankedTensorType> mmaTy = std::nullopt) {
     auto ctx = rewriter.getContext();
     auto kOffset = str_attr("offset");
@@ -78,14 +78,14 @@ public:
       bitwidth /= 2;
       // The instr_shape comes in number of elements already
     }
-    return build(loc, rewriter, llInv, bitwidth, smemBase, instrShape, MNdim,
-                 mmaVersion, mmaTy);
+    return build(loc, rewriter, llInv, bitwidth, smemBase, staticByteOffset,
+                 instrShape, MNdim, mmaVersion, mmaTy);
   }
 
   static FailureOr<DotOpMmaSmemLoader>
   build(Location loc, RewriterBase &rewriter, const LinearLayout &ll,
-        int bitwidth, Value smemBase, ArrayRef<unsigned> instrShape,
-        unsigned MNdim, int mmaVersion,
+        int bitwidth, Value smemBase, int64_t staticByteOffset,
+        ArrayRef<unsigned> instrShape, unsigned MNdim, int mmaVersion,
         std::optional<RankedTensorType> mmaTy = std::nullopt) {
     // ll is a map from two dimensions (dim0, dim1) or (row, col) into offsets
     // and blocks
@@ -107,6 +107,8 @@ public:
     // TODO We should assert in the verifier that the alignment is at least 16B
     smemBase = b.ptrtoint(i32_ty, smemBase);
     Value baseSrcb128 = b.lshr(smemBase, b.i32_val(4));
+    if (staticByteOffset != 0)
+      baseSrcb128 = b.add(baseSrcb128, b.i32_val(staticByteOffset / 16));
 
     if (mmaVersion == 3) {
       auto mmaLl = gpu::toLinearLayout(mmaTy.value());
@@ -329,17 +331,22 @@ private:
   }
 };
 
-static Value getOffsetedBase(Value v, gpu::MemDescType memDescTy,
-                             const TypeConverter *typeConverter,
-                             ConversionPatternRewriter &rewriter,
-                             Location loc) {
+static std::pair<Value, int64_t>
+getOffsetedBase(Value v, gpu::MemDescType memDescTy,
+                const TypeConverter *typeConverter,
+                ConversionPatternRewriter &rewriter, Location loc) {
   TritonLLVMOpBuilder tb(loc, rewriter);
   auto llvmElemTy = typeConverter->convertType(memDescTy.getElementType());
   auto smemObj =
       LLVM::getSharedMemoryObjectFromStruct(loc, v, llvmElemTy, rewriter);
   auto offset = smemObj.getShmemOffset(loc, rewriter, memDescTy);
-  auto base = smemObj.getBase();
-  return tb.gep(base.getType(), llvmElemTy, base, offset);
+  auto [base, staticByteOffset] =
+      LLVM::NVIDIA::getStaticSharedMemoryBaseAndOffset(smemObj.getBase());
+  if (staticByteOffset % 16 != 0) {
+    base = smemObj.getBase();
+    staticByteOffset = 0;
+  }
+  return {tb.gep(base.getType(), llvmElemTy, base, offset), staticByteOffset};
 }
 
 } // namespace NVIDIA

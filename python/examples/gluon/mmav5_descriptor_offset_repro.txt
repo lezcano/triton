@@ -1,0 +1,41 @@
+Reproducer:
+  python -m pytest -s --tb=short \
+    'python/examples/gluon/01-attention-forward.py::test_op[1cta-False-dtype0-False-64-1024-32-1]'
+
+Issue:
+  MMAv5 shared-memory descriptors encode the base address in 128-bit units.
+  The lowering formed each descriptor from a byte pointer after adding a static
+  shared-memory offset, so PTX repeated shifted extracts for aligned offsets
+  that are exact additions in descriptor units.
+
+Before PTX:
+  bfe.u32   %r110, %r42, 4, 14;
+  add.s32   %r111, %r42, 32768;
+  bfe.u32   %r112, %r111, 4, 14;
+  add.s32   %r113, %r42, 16384;
+  bfe.u32   %r114, %r113, 4, 14;
+  add.s32   %r115, %r42, 49152;
+  bfe.u32   %r116, %r115, 4, 14;
+
+After PTX:
+  shr.u32   %r110, %r42, 4;
+  bfe.u32   %r111, %r42, 4, 14;
+  add.s32   %r115, %r110, 1024;
+  and.b32   %r116, %r115, 16383;
+  add.s32   %r117, %r113, 1024;
+  and.b32   %r118, %r117, 16383;
+
+Reasoning:
+  For a 16-byte aligned static offset `16 * k`, descriptor base extraction is
+  bitwise exact under:
+    (((base + 16 * k) >> 4) & 0x3fff)
+      == (((base >> 4) + k) & 0x3fff)
+  including 32-bit wraparound. The lowering now peels aligned static shared
+  offsets and adds them after the shift in descriptor units.
+
+Effect:
+  Hand-editing the emitted PTX first reduced normalized `nvdisasm -c` lines
+  from 2732 to 2724. Compiling the checked-in attention specialization from
+  source after the lowering change preserves the same final SASS reduction:
+  dump SASS lines fall from 2654 to 2646 and cubin size from 230120 to 229920
+  bytes.

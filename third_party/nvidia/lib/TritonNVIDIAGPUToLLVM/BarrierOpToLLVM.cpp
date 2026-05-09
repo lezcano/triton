@@ -130,62 +130,8 @@ struct InitBarrierOpConversion
     // the same barrier.
     initCount *= numCTAs / barrierTy.getNumElements();
 
-    auto getConstantInt = [&](auto &&self,
-                              Value value) -> std::optional<APInt> {
-      APInt constant;
-      if (matchPattern(value, m_ConstantInt(&constant)))
-        return constant;
-      if (auto add = value.getDefiningOp<LLVM::AddOp>()) {
-        auto lhs = self(self, add.getLhs());
-        auto rhs = self(self, add.getRhs());
-        if (lhs && rhs)
-          return *lhs + *rhs;
-      }
-      if (auto mul = value.getDefiningOp<LLVM::MulOp>()) {
-        auto lhs = self(self, mul.getLhs());
-        auto rhs = self(self, mul.getRhs());
-        if (lhs && rhs)
-          return *lhs * *rhs;
-      }
-      return std::nullopt;
-    };
-    auto getInsertedValue = [](Value value,
-                               ArrayRef<int64_t> position) -> Value {
-      auto extract = value.getDefiningOp<LLVM::ExtractValueOp>();
-      if (!extract || extract.getPosition() != position)
-        return value;
-      Value container = extract.getContainer();
-      while (auto insert = container.getDefiningOp<LLVM::InsertValueOp>()) {
-        if (insert.getPosition() == position)
-          return insert.getValue();
-        container = insert.getContainer();
-      }
-      return value;
-    };
-
-    Value barrierBase = getInsertedValue(smemObj.getBase(), {0});
-    int64_t staticOffset = 0;
-    while (auto gep = barrierBase.getDefiningOp<LLVM::GEPOp>()) {
-      std::optional<int64_t> constantIndex;
-      auto rawIndices = gep.getRawConstantIndices();
-      if (rawIndices.size() == 1 &&
-          rawIndices[0] != LLVM::GEPOp::kDynamicIndex) {
-        constantIndex = rawIndices[0];
-      } else if (rawIndices.size() == 1 &&
-                 rawIndices[0] == LLVM::GEPOp::kDynamicIndex &&
-                 gep.getDynamicIndices().size() == 1) {
-        if (auto constant = getConstantInt(getConstantInt,
-                                           *gep.getDynamicIndices().begin()))
-          constantIndex = constant->getSExtValue();
-      }
-      if (!constantIndex)
-        break;
-      auto elemBitWidth = gep.getElemType().getIntOrFloatBitWidth();
-      if (elemBitWidth == 0 || elemBitWidth % 8 != 0)
-        break;
-      staticOffset += *constantIndex * (elemBitWidth / 8);
-      barrierBase = gep.getBase();
-    }
+    auto [barrierBase, staticOffset] =
+        LLVM::NVIDIA::getStaticSharedMemoryBaseAndOffset(smemObj.getBase());
 
     ::mlir::triton::PTXBuilder ptxBuilder;
     std::string ptx = "@$0 mbarrier.init.shared::cta.b64 [$1";

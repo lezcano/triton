@@ -79,6 +79,9 @@ Value getLeaderAddress(Location loc, ConversionPatternRewriter &rewriter,
                        Value barrierPtr,
                        mlir::triton::gpu::MemDescType barrierTy);
 
+// Peel constant shared-memory byte offsets from lowered memdesc pointers.
+std::pair<Value, int64_t> getStaticSharedMemoryBaseAndOffset(Value base);
+
 /// Create a predicate where only the lead CTA is active for two CTA mode.
 Value createLeadCTAPredicate(Location loc, RewriterBase &rewriter);
 } // namespace NVIDIA

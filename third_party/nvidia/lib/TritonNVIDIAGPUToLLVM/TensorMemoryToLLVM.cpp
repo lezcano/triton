@@ -707,7 +707,7 @@ static LogicalResult copySharedToTmem(ConversionPatternRewriter &rewriter,
                      .sublayout({kRow, kCol}, to_vector(cvt.getOutDimNames()));
 
   auto loader = DotOpMmaSmemLoader::build(loc, rewriter, cvtWarp, bitwidth,
-                                          smemBase, instrShape, 0, 5);
+                                          smemBase, 0, instrShape, 0, 5);
   if (failed(loader)) {
     return op->emitOpError("failed to find valid tcgen05.copy layout from "
                            "shared memory descriptor ")

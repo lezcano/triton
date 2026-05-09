@@ -431,10 +431,12 @@ LogicalResult convertDotImpl(const LLVMTypeConverter &typeConverter,
   bool aInTmem = isa<ttng::TensorMemoryEncodingAttr>(aTensorTy.getEncoding());
 
   Value baseA = loadedA;
+  int64_t staticByteOffsetA = 0;
   if (!aInTmem) {
-    baseA = getOffsetedBase(loadedA, aTensorTy, &typeConverter, rewriter, loc);
+    std::tie(baseA, staticByteOffsetA) =
+        getOffsetedBase(loadedA, aTensorTy, &typeConverter, rewriter, loc);
   }
-  Value baseB =
+  auto [baseB, staticByteOffsetB] =
       getOffsetedBase(loadedB, bTensorTy, &typeConverter, rewriter, loc);
 
   auto [M, N, K] = op.shape;
@@ -473,7 +475,8 @@ LogicalResult convertDotImpl(const LLVMTypeConverter &typeConverter,
   } else {
     auto isFp4a = op.numBitsPerElementA == 4;
     auto loader = DotOpMmaSmemLoader::build(loc, rewriter, aTensorTy, baseA,
-                                            aOperandShape, 0, 5, isFp4a);
+                                            staticByteOffsetA, aOperandShape, 0,
+                                            5, isFp4a);
     if (failed(loader)) {
       return mlir::emitError(loc, "failed to find valid tcgen05.mma layout for "
                                   "operand A in shared memory ")
@@ -485,8 +488,9 @@ LogicalResult convertDotImpl(const LLVMTypeConverter &typeConverter,
   }
 
   auto isFp4b = op.numBitsPerElementB == 4;
-  auto bLoader = DotOpMmaSmemLoader::build(loc, rewriter, bTensorTy, baseB,
-                                           bOperandShape, 1, 5, isFp4b);
+  auto bLoader =
+      DotOpMmaSmemLoader::build(loc, rewriter, bTensorTy, baseB,
+                                staticByteOffsetB, bOperandShape, 1, 5, isFp4b);
   if (failed(bLoader)) {
     return mlir::emitError(loc, "failed to find valid tcgen05.mma layout for "
                                 "operand B in shared memory ")
