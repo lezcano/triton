@@ -206,6 +206,31 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32} {
 
 // -----
 
+#shared = #ttg.nvmma_shared<{swizzlingByteWidth = 128, transposed = false, elementBitWidth = 16}>
+#shared1 = #ttg.nvmma_shared<{swizzlingByteWidth = 128, transposed = true, elementBitWidth = 16}>
+#tmem = #ttng.tensor_memory_encoding<blockM = 128, blockN = 128, colStride = 1>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.tensor_memory_size = 256 : i32} {
+  // CHECK-LABEL: @tc_gen5_mma_static_alloc_acc
+  // CHECK: %[[TMEM_PTR:.+]] = nvg.tensor_memory_base
+  // CHECK: %[[TMEM_BASE:.+]] = llvm.ptrtoint %[[TMEM_PTR]] : !llvm.ptr<6> to i32
+  // CHECK-COUNT-4: @$5 tcgen05.mma.cta_group::1.kind::f16 [ $0 + 64 ], $1, $2, $3, $4;", "r,l,l,r,b,b" %[[TMEM_BASE]]
+  // CHECK-COUNT-4: @$5 tcgen05.mma.cta_group::1.kind::f16 [ $0 + 192 ], $1, $2, $3, $4;", "r,l,l,r,b,b" %[[TMEM_BASE]]
+  tt.func @tc_gen5_mma_static_alloc_acc(
+      %a: !ttg.memdesc<256x64xf16, #shared, #ttg.shared_memory>,
+      %b: !ttg.memdesc<64x128xf16, #shared1, #ttg.shared_memory>) {
+    %false = arith.constant false
+    %true = arith.constant true
+    %acc = ttng.tmem_alloc {tensor_memory_col_offset = 64 : i32, tensor_memory_row_offset = 0 : i32} : () -> !ttg.memdesc<256x128xf32, #tmem, #ttng.tensor_memory, mutable>
+    ttng.tc_gen5_mma %a, %b, %acc, %false, %true :
+       !ttg.memdesc<256x64xf16, #shared, #ttg.shared_memory>,
+       !ttg.memdesc<64x128xf16, #shared1, #ttg.shared_memory>,
+       !ttg.memdesc<256x128xf32, #tmem, #ttng.tensor_memory, mutable>
+    tt.return
+  }
+}
+
+// -----
+
 #blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [1, 4], order = [1, 0]}>
 #blocked1 = #ttg.blocked<{sizePerThread = [1, 128], threadsPerWarp = [32, 1], warpsPerCTA = [4, 1], order = [0, 1]}>
 #tmem = #ttng.tensor_memory_encoding<blockM = 128, blockN = 128, colStride = 1>

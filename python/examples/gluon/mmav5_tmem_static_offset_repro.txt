@@ -1,0 +1,43 @@
+Reproducer:
+  python -m pytest -q -s --tb=short \
+    'python/examples/gluon/01-attention-forward.py::test_op[1cta-False-dtype0-False-64-1024-32-1]'
+
+Target:
+  NVIDIA GB300 / Blackwell
+
+Issue:
+  MMAv5 lowering already knows the static layout offset of accumulator and
+  A-in-TMEM allocations before LLVM conversion. Once those TMEM memdescs cross
+  warp-specialization captures, the lowered pointers carry the same offsets as
+  separate integer additions, so ptxas sees register bases instead of the
+  immediate form accepted by `tcgen05.mma`.
+
+Before PTX:
+  add.s32 %r1923, %r2, 128;
+  add.s32 %r1924, %r2, 256;
+  tcgen05.mma.cta_group::1.kind::f16 [ %r1923 + 0 ], ...;
+  tcgen05.mma.cta_group::1.kind::f16 [ %r1924 + 0 ], ...;
+
+After PTX:
+  tcgen05.mma.cta_group::1.kind::f16 [ %r2 + 128 ], ...;
+  tcgen05.mma.cta_group::1.kind::f16 [ %r2 + 256 ], ...;
+
+Exactness:
+  This only reassociates 32-bit TMEM addresses:
+    tmp = base + static_offset
+    [tmp + layout_offset]
+  becomes
+    [base + static_offset + layout_offset]
+  Instruction kinds, predicates, descriptors, and dynamic base values are
+  unchanged.
+
+Validation:
+  Starting from the emitted PTX after the source change, I hand-edited an
+  inverse baseline that reintroduced only those base additions and rewrote the
+  matching `tcgen05.mma` operands back to register bases. Compiling both with
+  `ptxas -arch=sm_103a` gives:
+
+  inverse baseline code-only SASS lines: 5577
+  folded immediate code-only SASS lines: 5561
+  inverse baseline cubin bytes: 237072
+  folded immediate cubin bytes: 236816

@@ -16,19 +16,66 @@ using ::mlir::triton::gpu::SharedLinearEncodingAttr;
 
 namespace {
 
+// Recover static TMEM address pieces before lowering hides them behind view ops
+// or warp-specialization captures.
+std::optional<int> getStaticTmemOffset(Value value) {
+  if (auto alloc = value.getDefiningOp<ttng::TMEMAllocOp>()) {
+    auto colOffset =
+        alloc->getAttrOfType<IntegerAttr>("tensor_memory_col_offset");
+    auto rowOffset =
+        alloc->getAttrOfType<IntegerAttr>("tensor_memory_row_offset");
+    if (!colOffset || !rowOffset)
+      return std::nullopt;
+    return colOffset.getInt() | (rowOffset.getInt() << 16);
+  }
+  if (auto index = value.getDefiningOp<MemDescIndexOp>()) {
+    APInt indexValue;
+    if (!matchPattern(index.getIndex(), m_ConstantInt(&indexValue)))
+      return std::nullopt;
+    auto baseOffset = getStaticTmemOffset(index.getSrc());
+    if (!baseOffset)
+      return std::nullopt;
+    int stride = ttng::getTmemAllocSizes(index.getType()).numCols;
+    return *baseOffset + indexValue.getSExtValue() * stride;
+  }
+  if (auto reinterpret = value.getDefiningOp<MemDescReinterpretOp>())
+    return getStaticTmemOffset(reinterpret.getSrc());
+  if (auto subslice = value.getDefiningOp<ttng::TMEMSubSliceOp>()) {
+    auto baseOffset = getStaticTmemOffset(subslice.getSrc());
+    if (!baseOffset)
+      return std::nullopt;
+    return *baseOffset +
+           ttng::getTMemSubSliceOffset(subslice.getType(), subslice.getN());
+  }
+  if (auto arg = dyn_cast<BlockArgument>(value)) {
+    if (auto partitions =
+            dyn_cast<WarpSpecializePartitionsOp>(arg.getOwner()->getParentOp()))
+      return getStaticTmemOffset(
+          partitions.getExplicitCaptures()[arg.getArgNumber()]);
+  }
+  return std::nullopt;
+}
+
 // Helper class to load tensor memory following MMAv5 layout.
 class DotOpMmaV5TmemLoader : public DotOpMmaMemLoader {
 public:
   static DotOpMmaV5TmemLoader build(Location loc, RewriterBase &rewriter,
                                     mlir::triton::gpu::MemDescType memTy,
-                                    Value tmemBase) {
+                                    Value tmemBase, Value sourceMemDesc) {
     // We take the full layout even when it is a subview
     // We'll just iterate the real shape when calling tmemLoad tho
     auto ll = toLinearLayout(memTy);
     auto bitwidth = memTy.getElementTypeBitWidth();
     auto tb = TritonLLVMOpBuilder(loc, rewriter);
+    int staticOffset = 0;
     Value address = tb.ptrtoint(i32_ty, tmemBase);
-    return DotOpMmaV5TmemLoader(ll.pseudoinvert(), address, bitwidth);
+    if (auto sourceOffset = getStaticTmemOffset(sourceMemDesc)) {
+      address = tb.ptrtoint(
+          i32_ty, nvgpu::TensorMemoryBaseAddress::create(rewriter, loc));
+      staticOffset = *sourceOffset;
+    }
+    return DotOpMmaV5TmemLoader(ll.pseudoinvert(), address, bitwidth,
+                                staticOffset);
   }
 
   MemDescOperand tmemLoad(int a, int b, ConversionPatternRewriter &rewriter,
@@ -38,7 +85,7 @@ public:
     int row = rowCol[0].second;
     int col = rowCol[1].second * bitwidth / 32;
     int offset = col | (row << 16);
-    return {address, offset};
+    return {address, staticOffset + offset};
   }
 
   MemDescOperand memLoad(int a, int b, ConversionPatternRewriter &rewriter,
@@ -47,12 +94,15 @@ public:
   }
 
 private:
-  DotOpMmaV5TmemLoader(LinearLayout ll, Value address, int bitwidth)
-      : ll(std::move(ll)), address(address), bitwidth(bitwidth) {}
+  DotOpMmaV5TmemLoader(LinearLayout ll, Value address, int bitwidth,
+                       int staticOffset)
+      : ll(std::move(ll)), address(address), bitwidth(bitwidth),
+        staticOffset(staticOffset) {}
 
   LinearLayout ll;
   Value address;
   int bitwidth;
+  int staticOffset;
 };
 
 //===----------------------------------------------------------------------===//
@@ -471,7 +521,7 @@ LogicalResult convertDotImpl(const LLVMTypeConverter &typeConverter,
   bool transA = false;
   if (aInTmem) {
     aLoader = std::make_unique<DotOpMmaV5TmemLoader>(
-        DotOpMmaV5TmemLoader::build(loc, rewriter, aTensorTy, baseA));
+        DotOpMmaV5TmemLoader::build(loc, rewriter, aTensorTy, baseA, a));
   } else {
     auto isFp4a = op.numBitsPerElementA == 4;
     auto loader = DotOpMmaSmemLoader::build(loc, rewriter, aTensorTy, baseA,
@@ -557,8 +607,8 @@ LogicalResult convertDot(const LLVMTypeConverter &typeConverter,
   dot.numBitsPerElementA = aTensorTy.getElementTypeBitWidth();
   dot.numBitsPerElementB = bTensorTy.getElementTypeBitWidth();
 
-  DotOpMmaV5TmemLoader dLoader =
-      DotOpMmaV5TmemLoader::build(loc, rewriter, dTensorTy, adaptor.getD());
+  DotOpMmaV5TmemLoader dLoader = DotOpMmaV5TmemLoader::build(
+      loc, rewriter, dTensorTy, adaptor.getD(), op.getD());
   dot.getAccAddress = [&](ConversionPatternRewriter &rewriter, Location loc,
                           int m, int n, const DotConversion::InstDesc &desc) {
     return dLoader.tmemLoad(m * desc.mmaSizeM, n * desc.mmaSizeN, rewriter,
