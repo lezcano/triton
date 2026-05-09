@@ -1,0 +1,35 @@
+Reproducer used during analysis:
+  checked-in `python/examples/gluon/05-moe-bmm1-fused-gather.py`
+  `ws_matmul_kernel`
+
+Target:
+  NVIDIA GB300
+
+Issue:
+  The warp-specialized matmul address lowering leaves two concrete register-only
+  three-input OR trees in LLVM IR:
+    %446 | (%380 | %381)
+    %445 | (%412 | %413)
+  PTXAS preserves each tree as two plain OR instructions instead of selecting a
+  ternary logic instruction.
+
+Before PTX:
+  or.b32   %r239, %r238, %r213;
+  or.b32   %r472, %r239, %r212;
+  or.b32   %r241, %r240, %r233;
+  or.b32   %r471, %r241, %r232;
+
+After PTX:
+  lop3.b32 %r472, %r238, %r213, %r212, 0xfe;
+  lop3.b32 %r471, %r240, %r233, %r232, 0xfe;
+
+Exactness:
+  PTX `lop3.b32` with LUT `0xfe` computes `a | b | c` for every input bit, so
+  it is bitwise identical to the two nested OR instructions for all 32-bit
+  values.  The LLVM canonicalizer only uses this form for register-only trees;
+  constants stay in normal ORs so they can still lower as immediates.
+
+Effect:
+  Hand-editing the emitted PTX first and assembling it with CUDA 13.1
+  `ptxas-blackwell` reduced final GB300 SASS from 1240 to 1232 non-padding
+  instructions for the checked-in `ws_matmul_kernel`.
