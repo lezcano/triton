@@ -702,6 +702,13 @@ struct ClampFOpConversion
       return std::nullopt;
     };
 
+    // clampf %x (negf %max) %max
+    if (auto negOp = op.getOperand(1).getDefiningOp<arith::NegFOp>()) {
+      if (negOp.getOperand() == op.getOperand(2)) {
+        return true;
+      }
+    }
+
     // clampf %x (sub 0.0 %max) %max
     if (auto subOp = op.getOperand(1).getDefiningOp<arith::SubFOp>()) {
       if (subOp.getOperand(1) == op.getOperand(2)) {
