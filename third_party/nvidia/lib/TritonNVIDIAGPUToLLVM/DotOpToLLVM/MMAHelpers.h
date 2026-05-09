@@ -349,12 +349,21 @@ private:
 static std::pair<Value, int64_t>
 getOffsetedBase(Value v, gpu::MemDescType memDescTy,
                 const TypeConverter *typeConverter,
-                ConversionPatternRewriter &rewriter, Location loc) {
+                ConversionPatternRewriter &rewriter, Location loc,
+                std::optional<int64_t> sourceStaticByteOffset = std::nullopt) {
   TritonLLVMOpBuilder tb(loc, rewriter);
   auto llvmElemTy = typeConverter->convertType(memDescTy.getElementType());
   auto smemObj =
       LLVM::getSharedMemoryObjectFromStruct(loc, v, llvmElemTy, rewriter);
   auto offset = smemObj.getShmemOffset(loc, rewriter, memDescTy);
+  if (sourceStaticByteOffset && *sourceStaticByteOffset % 16 == 0) {
+    // Preserve dynamic pieces already carried by the lowered memdesc base.
+    // `sourceStaticByteOffset` is the allocation offset included in that base.
+    Value base = tb.gep(smemObj.getBase().getType(), i8_ty, smemObj.getBase(),
+                        tb.i32_val(-*sourceStaticByteOffset));
+    return {tb.gep(base.getType(), llvmElemTy, base, offset),
+            *sourceStaticByteOffset};
+  }
   auto [base, staticByteOffset] =
       LLVM::NVIDIA::getStaticSharedMemoryBaseAndOffset(smemObj.getBase());
   if (staticByteOffset % 16 != 0) {

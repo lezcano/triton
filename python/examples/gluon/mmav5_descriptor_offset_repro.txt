@@ -76,3 +76,41 @@ Effect:
   from 2424 to 2416 and `UIADD3.X` carry instructions from 13 to 1 for the
   checked-in wgrad specialization. Source lowering now emits the same
   carry-free packing form when the low-word addition is proven not to carry.
+
+Additional source-offset recovery through warp specialization:
+  checked-in fprop specialization:
+    `python/examples/gluon/02-conv-fprop.py`:
+    `test_op[conv2d_fprop_fixed-1-384-64-64-384-3-3-1-0]`
+  checked-in block-scale specialization:
+    `python/examples/gluon/04-2cta-block-scale-matmul.py`:
+    `test_mma_scaled_warp_specialized[2-256-256-4-mxfp8-mxfp8-128-128-128]`
+
+  Warp specialization captures the already-lowered shared pointer and hides the
+  originating `local_alloc`. For these kernels the captured base includes both
+  the static allocation offset and a dynamic stage offset, so the original
+  lowered-pointer peeler could not recover the static aligned part.
+
+Before PTX:
+  add.s32 %r163, %r162, 49152;
+  bfe.u32 %r165, %r162, 4, 14;
+  bfe.u32 %r166, %r163, 4, 14;
+
+After PTX:
+  bfe.u32 %r165, %r162, 4, 14;
+  add.s32 %r166, %r165, 3072;
+  and.b32 %r166, %r166, 16383;
+
+Reasoning:
+  The source memdesc still records the `local_alloc` offset before capture. The
+  lowering subtracts only that known static allocation offset from the already
+  lowered captured base, preserving any dynamic stage offset, then passes the
+  static part to the existing descriptor-unit lowering. Thus the exact byte
+  address is unchanged and the existing descriptor-unit proof above applies
+  unchanged.
+
+Effect:
+  Hand-editing the current emitted PTX first and assembling with
+  `ptxas-blackwell` reduced normalized `nvdisasm -c` lines from 1920 to 1912
+  for fprop and from 1444 to 1436 for block-scale. Source replay after the
+  MMAv5 source-offset recovery emits the same descriptor-unit form in both
+  checked-in kernels.
