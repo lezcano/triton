@@ -1,0 +1,48 @@
+Reproducer:
+  python -m pytest -q -s --tb=short \
+    'python/examples/gluon/05-moe-bmm1-fused-gather.py::test_op[128-c0]'
+
+Target:
+  NVIDIA GB300
+
+Issue:
+  Rank-1 contiguous `tt.make_range` layouts still used the generic masked
+  thread-id helper even when the linear layout proves that register 0 is
+  exactly the CTA-local thread id. In these cases `.reqntid 128` already
+  guarantees `%tid.x` is in `[0, 127]`, so `%tid.x & 127` is redundant.
+
+Before PTX:
+  .reqntid 128
+  mov.u32  %r19, %tid.x;
+  and.b32  %r3, %r19, 127;
+  shl.b32  %r20, %r3, 16;
+  add.s32  %r24, %r3, %r29;
+
+After PTX:
+  .reqntid 128
+  mov.u32  %r3, %tid.x;
+  shl.b32  %r20, %r3, 16;
+  add.s32  %r24, %r3, %r29;
+
+Before SASS:
+  S2R R8, SR_TID.X;
+  LOP3.LUT R8, R8, 0x7f, RZ, 0xc0, !PT;
+
+After SASS:
+  S2R R10, SR_TID.X;
+
+Reasoning:
+  The fast path only fires when the linear-layout bases prove:
+    lane     = [1, 2, 4, ...]
+    warp     = [threadsPerWarp, 2 * threadsPerWarp, ...]
+    block    = [0, 0, ...]
+    register = [threadsPerCTA, 2 * threadsPerCTA, ...]
+
+  Under those conditions, register 0 is exactly `%tid.x` and higher registers
+  are disjoint additive multiples of the CTA thread count. The emitted integer
+  indices are unchanged bit-for-bit.
+
+Effect:
+  On `_ragged_tensor_metadata_compute`, the hand-mutated PTX drops one non-NOP
+  SASS instruction. On `_bitmatrix_metadata_compute_stage2`, the same family
+  drops two non-NOP SASS instructions.

@@ -24,11 +24,65 @@ struct MakeRangeOpConversion
     Location loc = op->getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     RankedTensorType ty = op.getType();
-    auto layout = ty.getEncoding();
     auto elemTy = ty.getElementType();
     assert(elemTy.isInteger(32));
     Value start = createIndexAttrConstant(rewriter, loc, elemTy, op.getStart());
-    auto idxs = emitIndices(loc, rewriter, targetInfo, layout, ty, true);
+    MLIRContext *ctx = rewriter.getContext();
+    LinearLayout ll = ttg::toLinearLayout(ty);
+    auto idxs = [&]() -> SmallVector<SmallVector<Value>> {
+      StringAttr kRegister = str_attr("register");
+      StringAttr kLane = str_attr("lane");
+      StringAttr kWarp = str_attr("warp");
+      StringAttr kBlock = str_attr("block");
+
+      auto isPow2Sequence = [](auto bases, uint32_t first) {
+        for (auto [i, basis] : llvm::enumerate(bases)) {
+          if (basis.size() != 1 || basis[0] != (first << i))
+            return false;
+        }
+        return true;
+      };
+      auto isZeroSequence = [](auto bases) {
+        return llvm::all_of(bases, [](auto basis) {
+          return basis.size() == 1 && basis[0] == 0;
+        });
+      };
+
+      // For contiguous rank-1 layouts, the register-0 make_range value is
+      // exactly the CTA-local thread ID. Keep the generic path for layouts
+      // where lane/warp/block bases do anything more interesting.
+      if (ty.getRank() != 1 ||
+          getWarpGroupStartThreadId(rewriter.getInsertionBlock()))
+        return emitIndices(loc, rewriter, targetInfo, ll, ty, true);
+      auto laneBases = ll.getBases().lookup(kLane);
+      auto warpBases = ll.getBases().lookup(kWarp);
+      auto blockBases = ll.getBases().lookup(kBlock);
+      auto regBases = ll.getBases().lookup(kRegister);
+      if (!isPow2Sequence(laneBases, 1) || !isZeroSequence(blockBases))
+        return emitIndices(loc, rewriter, targetInfo, ll, ty, true);
+
+      uint32_t threadsPerWarp = 1u << laneBases.size();
+      if (!isPow2Sequence(warpBases, threadsPerWarp))
+        return emitIndices(loc, rewriter, targetInfo, ll, ty, true);
+      uint32_t threadsPerCTA = threadsPerWarp << warpBases.size();
+      if (!isPow2Sequence(regBases, threadsPerCTA))
+        return emitIndices(loc, rewriter, targetInfo, ll, ty, true);
+
+      Operation *lookupPt = &rewriter.getInsertionBlock()->front();
+      if (threadsPerWarp != ttg::lookupThreadsPerWarp(rewriter) ||
+          threadsPerCTA != threadsPerWarp * ttg::lookupNumWarps(lookupPt))
+        return emitIndices(loc, rewriter, targetInfo, ll, ty, true);
+
+      Value tid = ::mlir::gpu::ThreadIdOp::create(rewriter, loc,
+                                                  ::mlir::gpu::Dimension::x);
+      tid = arith::IndexCastOp::create(rewriter, loc, i32_ty, tid);
+      SmallVector<SmallVector<Value>> contiguousIdxs;
+      for (uint32_t reg = 0; reg < ll.getInDimSize(kRegister); ++reg) {
+        Value idx = reg == 0 ? tid : b.add(tid, b.i32_val(reg * threadsPerCTA));
+        contiguousIdxs.push_back({idx});
+      }
+      return contiguousIdxs;
+    }();
     unsigned elems = idxs.size();
     SmallVector<Value> retVals(elems);
     // TODO: slice layout has more elements than expected.
