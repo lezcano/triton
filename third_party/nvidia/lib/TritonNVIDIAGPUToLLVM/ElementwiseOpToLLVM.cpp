@@ -577,6 +577,37 @@ struct FDivOpConversion
   }
 };
 
+struct TruncFOpConversion
+    : ElementwiseOpConversionBase<arith::TruncFOp, TruncFOpConversion> {
+  using Base = ElementwiseOpConversionBase<arith::TruncFOp, TruncFOpConversion>;
+  using Base::Base;
+  using Adaptor = typename Base::OpAdaptor;
+
+  SmallVector<Value> createDestOps(arith::TruncFOp op, Adaptor adaptor,
+                                   ConversionPatternRewriter &rewriter,
+                                   Type elemTy, MultipleOperandsRange operands,
+                                   Location loc) const {
+    Type srcElemTy = getElementTypeOrSelf(op.getIn());
+    Type dstElemTy = getElementTypeOrSelf(op.getOut());
+    if (srcElemTy.isF32() && dstElemTy.isF16() &&
+        isa<RankedTensorType>(op.getType()) && operands.size() >= 2) {
+      PTXBuilder builder;
+      auto &cvt = *builder.create("cvt.rn.f16x2.f32");
+      auto result = builder.newOperand("=r");
+      auto lo = builder.newOperand(operands[0][0], "r");
+      auto hi = builder.newOperand(operands[1][0], "r");
+      cvt(result, hi, lo);
+
+      auto b = TritonLLVMOpBuilder(loc, rewriter);
+      Value packed = builder.launch(rewriter, loc, vec_ty(f16_ty, 2), false);
+      return {b.extract_element(f16_ty, packed, b.i32_val(0)),
+              b.extract_element(f16_ty, packed, b.i32_val(1))};
+    }
+
+    return {LLVM::FPTruncOp::create(rewriter, loc, elemTy, operands[0][0])};
+  }
+};
+
 struct F32x2MulFOpConversion
     : ElementwiseOpConversionBase<arith::MulFOp, F32x2MulFOpConversion> {
   using Base =
@@ -953,11 +984,11 @@ void mlir::triton::NVIDIA::populateElementwiseOpToLLVMPatterns(
   POPULATE_OP(arith::MulFOp, LLVM::FMulOp);
 
   POPULATE_OP(arith::ExtFOp, LLVM::FPExtOp);
-  POPULATE_OP(arith::TruncFOp, LLVM::FPTruncOp);
 
 #undef POPULATE_OP
 
   patterns.add<FDivOpConversion>(typeConverter, axisInfoAnalysis, benefit);
+  patterns.add<TruncFOpConversion>(typeConverter, axisInfoAnalysis, benefit);
   patterns.add<F32x2MulFOpConversion>(typeConverter, axisInfoAnalysis,
                                       computeCapability,
                                       PatternBenefit(benefit.getBenefit() + 1));
