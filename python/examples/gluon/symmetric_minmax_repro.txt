@@ -9,8 +9,9 @@ Target:
 Issue:
   The no-NaN symmetric clip spelling lowers through `arith.maxnumf` followed
   by `arith.minnumf`, so it missed the Hopper+ `min.xorsign.abs` path used by
-  `tt.clampf`. The checked-in MoE Swiglu path emits the dynamic
-  `negf %limit` spelling.
+  `tt.clampf`. The checked-in MoE Swiglu path also emits exact opposite splat
+  constants:
+    dense<-1.38622916>, dense<1.38622916>
 
 Before PTX:
   neg.f32 %r15, %r5;
@@ -30,5 +31,8 @@ After SASS:
 Effect:
   For the 4 values handled by one thread in the repro, PTX register count
   drops from 23 to 15 and SASS uses 4 `FMNMX.XORSIGN` instructions instead of
-  8 plain `FMNMX` instructions. The same fusion removes the plain
-  `max.f32`/`min.f32` pair in the MoE Swiglu clip.
+  8 plain `FMNMX` instructions. Hand-editing the emitted MoE PTX first for the
+  exact opposite-constant spelling and assembling it with CUDA 13.1 `ptxas`
+  reduced `ws_matmul_kernel` from 1256 to 1248 final SASS instructions while
+  replacing the 8 plain `max.f32`/`min.f32` pairs with 8
+  `FMNMX.XORSIGN` instructions.

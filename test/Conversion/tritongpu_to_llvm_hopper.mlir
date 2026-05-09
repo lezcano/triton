@@ -268,6 +268,22 @@ module attributes {"ttg.target" = "cuda:90", "ttg.num-ctas" = 1 : i32, "ttg.num-
 
 // -----
 
+#blocked = #ttg.blocked<{sizePerThread = [4], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>
+// CHECK-LABEL: symmetric_minnum_maxnum_constants
+module attributes {"ttg.target" = "cuda:90", "ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @symmetric_minnum_maxnum_constants(%x : tensor<1024xf32, #blocked>) {
+    %lower = arith.constant dense<-1.38622916> : tensor<1024xf32, #blocked>
+    %upper = arith.constant dense<1.38622916> : tensor<1024xf32, #blocked>
+    %clamped_low = arith.maxnumf %x, %lower : tensor<1024xf32, #blocked>
+
+    // CHECK-COUNT-8: nvvm.fmin.xorsign.abs.f
+    %clamped = arith.minnumf %clamped_low, %upper : tensor<1024xf32, #blocked>
+    tt.return
+  }
+}
+
+// -----
+
 // CHECK-LABEL: clamp_negf_scalar
 module attributes {"ttg.target" = "cuda:90", "ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 32 : i32} {
   tt.func public @clamp_negf_scalar(%x : f32, %limit : f32) {

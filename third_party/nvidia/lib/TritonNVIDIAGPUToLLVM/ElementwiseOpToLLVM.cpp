@@ -786,8 +786,16 @@ struct SymmetricMinMaxFOpConversion : ConvertOpToLLVMPattern<arith::MinNumFOp> {
     auto maxOp = op.getLhs().getDefiningOp<arith::MaxNumFOp>();
     if (!maxOp)
       return failure();
-    auto negOp = maxOp.getRhs().getDefiningOp<arith::NegFOp>();
-    if (!negOp || negOp.getOperand() != op.getRhs())
+
+    bool hasSymmetricLimit = false;
+    if (auto negOp = maxOp.getRhs().getDefiningOp<arith::NegFOp>())
+      hasSymmetricLimit = negOp.getOperand() == op.getRhs();
+    auto lowerInitializer = getSplatInitializer(maxOp.getRhs());
+    auto upperInitializer = getSplatInitializer(op.getRhs());
+    hasSymmetricLimit |= lowerInitializer.has_value() &&
+                         upperInitializer.has_value() &&
+                         lowerInitializer.value() == -upperInitializer.value();
+    if (!hasSymmetricLimit)
       return failure();
 
     auto resultTy = op.getType();
