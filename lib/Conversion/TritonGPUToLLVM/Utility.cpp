@@ -592,6 +592,19 @@ applyLinearLayoutVec(Location loc, RewriterBase &rewriter,
   auto baseIndices =
       applyLinearLayout(loc, rewriter, layout, indicesWithZeroReg);
 
+  // Track which output bits may be set by non-register inputs. When the
+  // register contribution is disjoint, XOR and integer add are the same value;
+  // the additive spelling lets address users fold the constant more often.
+  SmallVector<uint32_t> nonRegBits(layout.getNumOutDims(), 0);
+  for (const auto &[inDim, bases] : layout.getBases()) {
+    if (inDim == kRegister)
+      continue;
+    for (const auto &basis : bases) {
+      for (auto [outIdx, value] : llvm::enumerate(basis))
+        nonRegBits[outIdx] |= value;
+    }
+  }
+
   SmallVector<SmallVector<std::pair<StringAttr, Value>>> ret;
 
   // Iterate over registers, applying XOR trick
@@ -605,7 +618,12 @@ applyLinearLayoutVec(Location loc, RewriterBase &rewriter,
     SmallVector<std::pair<StringAttr, Value>> combinedIndices;
     for (auto [base, regIdx] : llvm::zip(baseIndices, regIndices)) {
       assert(base.first == regIdx.first);
-      Value combined = b.xor_(base.second, b.i32_val(regIdx.second));
+      Value regVal = b.i32_val(regIdx.second);
+      auto outIdx = layout.getOutDimIndex(base.first);
+      bool additive =
+          regIdx.second != 0 && (nonRegBits[outIdx] & regIdx.second) == 0;
+      Value combined = additive ? Value(b.add(base.second, regVal))
+                                : Value(b.xor_(base.second, regVal));
       combinedIndices.emplace_back(base.first, combined);
     }
 

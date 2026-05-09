@@ -1,0 +1,44 @@
+Reproducer used during analysis:
+  checked-in dgrad specialization:
+    `python/examples/gluon/02-conv-dgrad.py`:
+    `test_op[conv2d_dgrad_fixed-1-384-64-64-384-3-3-1-0]`
+
+Target:
+  NVIDIA GB300
+
+Issue:
+  `applyLinearLayoutVec` combines the register contribution with the common
+  non-register contribution using xor.  Some real layouts prove that the two
+  bit sets are disjoint, so spelling the same value as an integer add gives
+  later address arithmetic a constant it can fold.
+
+Before PTX:
+  mad.lo.s32 %r304, %r301, 2064, %r303;
+  add.s32    %r35, %r72, %r304;
+  xor.b32    %r305, %r304, 16;
+  add.s32    %r36, %r72, %r305;
+  xor.b32    %r306, %r304, 32;
+  add.s32    %r37, %r72, %r306;
+
+After PTX:
+  mad.lo.s32 %r304, %r301, 2064, %r303;
+  add.s32    %r35, %r72, %r304;
+  add.s32    %r305, %r304, 16;
+  add.s32    %r36, %r72, %r305;
+  add.s32    %r306, %r304, 32;
+  add.s32    %r37, %r72, %r306;
+
+Proof:
+  For each output dimension, the lowering ORs together every basis bit from
+  inputs other than `register`.  If that static mask is disjoint from a
+  register contribution `r`, then the dynamic non-register value `b` has
+  `(b & r) == 0` for every runtime input.  Therefore:
+    b xor r == b or r == b + r
+  bit for bit, with no carries.  Layouts without that proof keep the original
+  xor spelling.
+
+Effect:
+  Hand-editing the emitted PTX first changed only the seven proven-disjoint
+  register offsets in this checked-in specialization from `xor.b32` to
+  `add.s32`.  Final normalized `nvdisasm -c` instruction count fell from 4368
+  to 4360, and cubin size fell from 232512 to 231064 bytes.
