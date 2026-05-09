@@ -1,0 +1,48 @@
+Reproducer:
+  python -m pytest -s --tb=short \
+    'python/examples/gluon/01-attention-forward.py::test_op[1cta-False-dtype0-False-128-1024-32-1]'
+
+Target:
+  NVIDIA GB300
+
+Issue:
+  The attention shared-memory address lowering materialized the second
+  unpadded `memdesc_subslice` tile by XORing the full affine offset into every
+  register offset. The upper affine bit is disjoint from the active tile and
+  can instead be added after the in-tile XOR, leaving an additive immediate for
+  LLVM to fold or hoist.
+
+Before PTX:
+  xor.b32 %r1356, %r1348, 16400;
+  add.s32 %r39, %r55, %r1356;
+  ...
+  xor.b32 %r1362, %r1348, 16496;
+  add.s32 %r45, %r55, %r1362;
+
+Hand-edited PTX:
+  xor.b32 %r1356, %r1348, 16;
+  add.s32 %r1356, %r1356, 16384;
+  add.s32 %r39, %r55, %r1356;
+  ...
+  xor.b32 %r1362, %r1348, 112;
+  add.s32 %r1362, %r1362, 16384;
+  add.s32 %r45, %r55, %r1362;
+
+Reasoning:
+  `MemDescSubsliceOp::verify()` requires split offsets to stay outside the tile.
+  `SharedMemoryObject::getMaskSpanOffsets()` records those physical affine bits,
+  and `actionAdditiveStrides()` already excludes them from additive in-tile
+  register strides. For unpadded layouts, the affine subslice bits are therefore
+  disjoint from both the dynamic base and the in-tile register offsets:
+    `(dynamic xor reg) + affine == dynamic xor reg xor affine`
+  exactly. The lowering only moves that affine component to an addition; the
+  potentially overlapping in-tile register contribution remains an XOR.
+
+Effect:
+  Hand-editing the current emitted PTX first and assembling with CUDA 13.1
+  `ptxas-blackwell` reduced normalized `nvdisasm -c` lines from 3337 to 3273
+  and cubin size from 279912 to 279008 bytes.
+
+  Compiling the same checked-in specialization from source after the lowering
+  change preserves the win: dump SASS lines fall from 3227 to 3195 and cubin
+  size from 278648 to 278192 bytes.
