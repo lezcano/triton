@@ -1,0 +1,35 @@
+Reproducer used during analysis:
+  checked-in MoE specialization:
+    `python/examples/gluon/05-moe-bmm1-fused-gather.py`:
+    `test_op[128-c0]`
+
+Target:
+  NVIDIA GB300
+
+Issue:
+  Static `ttg.memdesc_index` ops on barrier buffers become constant shared-memory
+  GEPs before `ttng.init_barrier` lowers. The barrier lowering passed those
+  already-offset pointers as register operands, so PTX materialized one
+  `add.s32` address per barrier instead of using the instruction's immediate
+  shared-memory displacement.
+
+Before PTX:
+  add.s32  %r184, %r38, 113664;
+  @%p59 mbarrier.init.shared::cta.b64 [%r184], 1;
+
+After PTX:
+  @%p59 mbarrier.init.shared::cta.b64 [%r38 + 113664], 1;
+
+Effect:
+  The real `ws_matmul_kernel` contains 34 matching one-use barrier-init
+  addresses. Hand-editing those PTX sites first and reassembling with
+  `ptxas-blackwell` reduced final SASS instruction lines from 1256 to 1248 and
+  cubin size from 99664 to 98656 bytes.
+
+Exactness:
+  This is only an addressing-mode rewrite:
+    `tmp = base + imm; init [tmp]`
+  and
+    `init [base + imm]`
+  name the same shared-memory byte address for every input. The predicate,
+  barrier count, ordering, and barrier placement are unchanged.
