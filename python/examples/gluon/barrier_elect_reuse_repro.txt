@@ -1,0 +1,52 @@
+Reproducer:
+  python -m pytest -s --tb=short \
+    python/examples/gluon/01-attention-forward.py::test_op[1cta-False-dtype0-False-128-1024-32-1]
+
+Target:
+  NVIDIA GB300, elect lowering gated by compute capability >= 90
+
+Issue:
+  Barrier init/inval lowering and TMA copy lowering created fresh default-mask
+  `elect.sync` ops for adjacent operations in one straight-line block. The
+  attention kernel therefore repeated the same election in both its barrier
+  prologue and direct TMA copy runs.
+
+Exactness:
+  The PTX ISA states that `elect.sync` chooses one active leader thread and
+  that the same member mask elects the same leader deterministically. The
+  reused value is limited to a prior default-mask election in the same block,
+  so no control-flow can change the active threads between the two uses.
+
+Before PTX:
+  elect.sync %r1299|%p99, -1;
+  and.pred %p69, %p98, %p99;
+  @%p69 mbarrier.init.shared::cta.b64 [%r1276], 1;
+  elect.sync %r1300|%p100, -1;
+  and.pred %p70, %p98, %p100;
+  @%p70 mbarrier.init.shared::cta.b64 [%r1277], 1;
+
+After PTX:
+  elect.sync %r1299|%p99, -1;
+  and.pred %p69, %p98, %p99;
+  @%p69 mbarrier.init.shared::cta.b64 [%r1276], 1;
+  @%p69 mbarrier.init.shared::cta.b64 [%r1277], 1;
+
+The same helper also reuses direct TMA elections:
+
+  Before:
+    elect.sync %r71|%p5, -1;
+    @%p5 cp.async.bulk.tensor.2d.global.shared::cta.bulk_group ...;
+    elect.sync %r72|%p6, -1;
+    @%p6 cp.async.bulk.tensor.2d.global.shared::cta.bulk_group ...;
+
+  After:
+    elect.sync %r71|%p5, -1;
+    @%p5 cp.async.bulk.tensor.2d.global.shared::cta.bulk_group ...;
+    @%p5 cp.async.bulk.tensor.2d.global.shared::cta.bulk_group ...;
+
+Effect:
+  In the checked-in attention specialization, PTX `elect.sync` count drops
+  from 46 to 19 and final SASS instruction count drops from 14857 to 14755 for
+  the barrier prologue. Reusing later direct-TMA elections in the checked-in
+  `attention_kernel` lowers final SASS further from 3072 to 3064 instructions
+  and cubin size from 276016 to 275960 bytes.

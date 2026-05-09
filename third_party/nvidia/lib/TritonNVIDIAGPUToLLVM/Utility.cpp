@@ -164,6 +164,17 @@ Value permute(Location loc, RewriterBase &rewriter, Value a, Value b,
 
 /// Create a predicate with just single active thread.
 Value createElectPredicate(Location loc, OpBuilder &rewriter) {
+  // `elect.sync` is deterministic for one mask, so a same-block default-mask
+  // election remains valid for later lowerings that need the same leader.
+  auto *block = rewriter.getInsertionBlock();
+  auto insertPt = rewriter.getInsertionPoint();
+  for (auto it = insertPt; it != block->begin();) {
+    --it;
+    if (auto priorElect = dyn_cast<NVVM::ElectSyncOp>(*it)) {
+      if (priorElect->getNumOperands() == 0)
+        return priorElect.getResult();
+    }
+  }
   return NVVM::ElectSyncOp::create(rewriter, loc, i1_ty,
                                    /*membermask=*/Value());
 }
