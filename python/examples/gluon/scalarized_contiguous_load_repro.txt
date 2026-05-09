@@ -1,0 +1,40 @@
+Reproducer used during analysis:
+  the checked-in non-reuse gather-index load in
+  `python/examples/gluon/05-moe-bmm1-fused-gather.py`
+
+Target:
+  NVIDIA GB300
+
+Issue:
+  The MoE gather-index pointer tensor is contiguous in element locations, but
+  its dynamic base is not aligned enough for vector loads. Masked scalar load
+  lowering used a separately scalarized base pointer for each lane instead of
+  keeping one base with PTX immediate offsets.
+
+Before PTX:
+  mad.wide.s32 %rd47, %r154, 4, %rd56;
+  cvt.s64.s32 %rd57, %r153;
+  cvt.u64.u32 %rd58, %r7;
+  or.b64 %rd59, %rd57, %rd58;
+  shl.b64 %rd60, %rd59, 2;
+  add.s64 %rd61, %rd56, %rd60;
+  @%p45 ld.global.b32 { %r165 }, [ %rd47 + 0 ];
+  @%p46 ld.global.b32 { %r166 }, [ %rd48 + 0 ];
+
+After PTX:
+  mad.wide.s32 %rd47, %r154, 4, %rd56;
+  @%p45 ld.global.b32 { %r165 }, [ %rd47 + 0 ];
+  @%p46 ld.global.b32 { %r166 }, [ %rd47 + 4 ];
+
+Before SASS:
+  LDG.E R13, desc[UR26][R4.64+0x4];
+  LDG.E R2, desc[UR26][R2.64];
+
+After SASS:
+  LDG.E R13, desc[UR26][R2.64];
+  LDG.E R4, desc[UR26][R2.64+0x4];
+
+Effect:
+  Compiling the checked-in MoE specialization from source reduces final dumped
+  SASS from 1294 lines to 1286 lines by using one base for the scalarized
+  contiguous gather-index loads.

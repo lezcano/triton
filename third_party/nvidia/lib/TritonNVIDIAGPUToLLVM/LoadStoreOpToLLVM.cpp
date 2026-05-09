@@ -197,6 +197,20 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
     auto freeVarMasks = getFreeVariableMasks(ptr.getType());
     uint32_t regMask = freeVarMasks[str_attr("reg")];
 
+    // Vector loads need aligned bases, but scalar loads can still share one
+    // base across a contiguous per-thread pointer run via PTX immediates.
+    size_t scalarizedContiguousRun = 1;
+    if (llMask && vec == 1) {
+      if (auto tensorTy = dyn_cast<RankedTensorType>(ptr.getType()); tensorTy) {
+        if (auto *axisInfo = axisAnalysisPass.getAxisInfo(ptr)) {
+          auto order = ttg::getOrder(tensorTy);
+          auto contigPerThread = ttg::getContigPerThread(tensorTy);
+          scalarizedContiguousRun = std::min<size_t>(
+              axisInfo->getContiguity(order[0]), contigPerThread[order[0]]);
+        }
+      }
+    }
+
     LDBG("LoadOp numElems = " << numElems << " vec = " << vec
                               << " valueElemNBits = " << valueElemNBits << " "
                               << op.getType());
@@ -211,8 +225,14 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
         continue;
       }
 
-      // TODO: optimization when ptr is GEP with constant offset
+      // Keep a single base for masked loads that scalarize a known contiguous
+      // pointer run.
+      size_t contiguousRunStart = vecStart;
       size_t in_off = 0;
+      if (scalarizedContiguousRun > 1) {
+        contiguousRunStart = vecStart - vecStart % scalarizedContiguousRun;
+        in_off = (vecStart - contiguousRunStart) * valueElemNBits / 8;
+      }
 
       const size_t maxWordWidth = std::max<size_t>(32, valueElemNBits);
       const size_t totalWidth = valueElemNBits * vec;
@@ -275,7 +295,7 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
       }
 
       auto *addrOpr =
-          ptxBuilder.newAddrOperand(ptrElems[vecStart], "l", in_off);
+          ptxBuilder.newAddrOperand(ptrElems[contiguousRunStart], "l", in_off);
 
       // Create L2 cache policy register if needed
       Value l2PolicyReg =
