@@ -39,3 +39,40 @@ Effect:
   source after the lowering change preserves the same final SASS reduction:
   dump SASS lines fall from 2654 to 2646 and cubin size from 230120 to 229920
   bytes.
+
+Additional carry-free descriptor packing:
+  checked-in wgrad specialization:
+    `python/examples/gluon/02-conv-wgrad.py`:
+    `test_op[conv2d_wgrad_fixed-1-128-64-64-128-1-1-1-0]`
+
+  The same MMAv5 descriptor lowering also formed four descriptors from one
+  14-bit dynamic base with separate 64-bit additions.
+
+Before PTX:
+  bfe.u32 %r255, %r253, 4, 14;
+  cvt.u64.u32 %rd16, %r255;
+  or.b64  %rd8,  %rd16, 4611756662083026944;
+  add.s64 %rd10, %rd16, 4611756662083027072;
+  add.s64 %rd12, %rd16, 4611756662083027200;
+  add.s64 %rd14, %rd16, 4611756662083027328;
+
+After PTX:
+  bfe.u32 %r255, %r253, 4, 14;
+  mov.b32 %r1093, 1073758272;
+  add.u32 %r1094, %r255, 33554432;
+  mov.b64 %rd8, {%r1094, %r1093};
+  add.u32 %r1096, %r255, 33554560;
+  mov.b64 %rd10, {%r1096, %r1093};
+
+Reasoning:
+  The dynamic descriptor base is masked to `0x3fff`. The low descriptor words
+  in this family are `0x02000000`, `0x02000080`, `0x02000100`, and
+  `0x02000180`; even the largest sum is only `0x0200417f`. Because no low-word
+  add can carry into bit 32, packing `{low_add, high_const}` is bitwise
+  equivalent to the original 64-bit descriptor add.
+
+Effect:
+  Hand-editing the current emitted PTX first reduced final SASS instructions
+  from 2424 to 2416 and `UIADD3.X` carry instructions from 13 to 1 for the
+  checked-in wgrad specialization. Source lowering now emits the same
+  carry-free packing form when the low-word addition is proven not to carry.

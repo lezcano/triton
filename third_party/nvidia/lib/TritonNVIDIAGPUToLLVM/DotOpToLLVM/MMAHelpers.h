@@ -2,6 +2,8 @@
 #include "mlir/Support/LLVM.h"
 #include "triton/Tools/LayoutUtils.h"
 
+#include <limits>
+
 namespace mlir {
 namespace triton {
 namespace NVIDIA {
@@ -154,7 +156,7 @@ public:
     if (failed(desc))
       return failure();
 
-    Value baseb128 = b.zext(i64_ty, b.and_(baseSrcb128, b.i32_val(0x3FFF)));
+    Value baseb128 = b.and_(baseSrcb128, b.i32_val(0x3FFF));
     return DotOpMmaSmemLoader{*desc, baseb128, ll};
   }
 
@@ -176,11 +178,24 @@ public:
     uint32_t mask = (desc.swizzlingByteWidth >> 4) - 1;
     currDesc.matrixBaseOffset = (smemByteOffsetb8 / 128) & mask;
     int32_t smemByteOffsetb128 = smemByteOffsetb8 >> 4;
-    Value descValBase =
-        tb.int_val(64, currDesc.descriptor + smemByteOffsetb128);
-    // Add the base address to the descriptor
-    Value descVal = tb.add(descValBase, baseb128);
-    return descVal;
+    uint64_t descBits = currDesc.descriptor + smemByteOffsetb128;
+    uint32_t descLo = descBits;
+
+    // `baseb128` is masked to 14 bits. If adding it cannot carry out of the
+    // low word, keep the dynamic part in i32 and pack the descriptor words.
+    if (descLo <= std::numeric_limits<uint32_t>::max() - 0x3FFFu) {
+      Type descWordsTy = vec_ty(i32_ty, 2);
+      Value descWords = tb.undef(descWordsTy);
+      descWords = tb.insert_element(descWordsTy, descWords,
+                                    tb.add(tb.i32_val(descLo), baseb128),
+                                    tb.i32_val(0));
+      descWords = tb.insert_element(descWordsTy, descWords,
+                                    tb.i32_val(descBits >> 32), tb.i32_val(1));
+      return tb.bitcast(descWords, i64_ty);
+    }
+
+    Value descValBase = tb.i64_val(descBits);
+    return tb.add(descValBase, tb.zext(i64_ty, baseb128));
   }
   MemDescOperand memLoad(int a, int b, ConversionPatternRewriter &rewriter,
                          Location loc) const override {
