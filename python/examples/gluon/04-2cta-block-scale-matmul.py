@@ -943,6 +943,13 @@ def format_config(cfg):
 
 
 def run_benchmark(use_autotuned=False):
+    try:
+        import triton.profiler  # noqa: F401
+        bench_fn = triton.testing.do_bench_cudagraph_proton
+    except ImportError:
+        # Fallback to do_bench as do_bench_cudagraph does not clear the L2 cache.
+        bench_fn = triton.testing.do_bench
+
     results = {}
     best_configs = {}
     for a_format, b_format in ALL_FORMATS:
@@ -954,7 +961,7 @@ def run_benchmark(use_autotuned=False):
                 if use_autotuned:
                     print(f"  {label} {variant} MNK={MNK}: ...", end="", flush=True)
                 fn = make_fn(variant, A, B, A_scale, B_scale, VEC_SIZE, a_format, use_autotuned=use_autotuned)
-                ms = triton.testing.do_bench(fn)
+                ms = bench_fn(fn)
                 tflops = 2.0 * MNK**3 * 1e-12 / (ms * 1e-3)
                 results[(label, variant, MNK)] = tflops
                 if use_autotuned:

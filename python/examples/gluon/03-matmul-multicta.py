@@ -845,6 +845,23 @@ def run_profile(shape, a, b, c_torch, run_gluon):
     show_profile("matmul")
 
 
+def run_benchmark(shape, a, b, c_torch, run_gluon):
+    M, N, K = shape
+    flops = 2.0 * M * N * K
+
+    try:
+        import triton.profiler  # noqa: F401
+        bench_fn = triton.testing.do_bench_cudagraph_proton
+    except ImportError:
+        # Fallback to do_bench as do_bench_cudagraph does not clear the L2 cache.
+        bench_fn = triton.testing.do_bench
+
+    torch_ms = bench_fn(lambda: torch.matmul(a, b, out=c_torch))
+    gluon_ms = bench_fn(run_gluon)
+    print(f"Torch: {flops * 1e-12 / (torch_ms * 1e-3):.1f} TFLOPS")
+    print(f"Gluon: {flops * 1e-12 / (gluon_ms * 1e-3):.1f} TFLOPS")
+
+
 def benchmark(*, profile=True, use_autotuned=False):
     if not is_blackwell():
         raise RuntimeError("This benchmark requires a Blackwell CUDA GPU.")
@@ -860,6 +877,8 @@ def benchmark(*, profile=True, use_autotuned=False):
     torch.testing.assert_close(actual, expected, atol=1e-1, rtol=1e-2)
     if use_autotuned:
         print(f"Autotuned best config: {matmul_kernel.best_config}")
+
+    run_benchmark(shape, a, b, c_torch, run_gluon)
 
     if not profile:
         print("Skipping profiling (--no-profile).")

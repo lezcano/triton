@@ -11,7 +11,6 @@ import triton.experimental.gluon.language.nvidia.blackwell.tma as tma
 from triton.experimental.gluon.language.nvidia.blackwell import float2
 import triton.experimental.gluon.language.nvidia.hopper.mbarrier as mbarrier
 import triton.language.extra.libdevice as libdevice
-from triton.testing import do_bench_cudagraph
 
 from triton_kernels.distributed import make_expt_dict_uniform
 from triton_kernels.matmul import (
@@ -1465,7 +1464,13 @@ def estimate_benchmark_work(c: MLPConfig, prepared: PreparedCase) -> tuple[int, 
 def benchmark_kernel(prepared: PreparedCase, kernel, flops: int, nbytes: int) -> tuple[float, float]:
     precision_config = make_precision_config(prepared)
     out = make_output_buffer(prepared)
-    ms = do_bench_cudagraph(lambda: run_kernel(prepared, kernel, precision_config, out))
+    try:
+        import triton.profiler  # noqa: F401
+        bench_fn = triton.testing.do_bench_cudagraph_proton
+    except ImportError:
+        # Fallback to do_bench as do_bench_cudagraph does not clear the L2 cache.
+        bench_fn = triton.testing.do_bench
+    ms = bench_fn(lambda: run_kernel(prepared, kernel, precision_config, out))
     seconds = ms * 1e-3
     return flops * 1e-12 / seconds, nbytes * 1e-12 / seconds
 

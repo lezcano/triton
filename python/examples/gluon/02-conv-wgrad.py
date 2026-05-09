@@ -1066,7 +1066,13 @@ def _make_bench_inputs(N, H, W, Ci, Co, R, S, stride_val, pad_val):
 
 
 def _benchmark_tflops(fn, *, N, H, W, Ci, Co, R, S, stride_val, pad_val):
-    ms = triton.testing.do_bench(fn)
+    try:
+        import triton.profiler  # noqa: F401
+        bench_fn = triton.testing.do_bench_cudagraph_proton
+    except ImportError:
+        # Fallback to do_bench as do_bench_cudagraph does not clear the L2 cache.
+        bench_fn = triton.testing.do_bench
+    ms = bench_fn(fn)
     out_h = (H + 2 * pad_val - R) // stride_val + 1
     out_w = (W + 2 * pad_val - S) // stride_val + 1
     flops = 2.0 * N * out_h * out_w * Co * Ci * R * S
