@@ -1,0 +1,51 @@
+Reproducer used during analysis:
+  checked-in MoE specialization:
+    `python/examples/gluon/05-moe-bmm1-fused-gather.py`:
+    `test_op[128-c0]`
+  kernel:
+    `_p_matmul`
+
+Target:
+  NVIDIA GB300
+
+Issue:
+  The Swiglu exponential setup has two adjacent tensor `arith.mulf` ops:
+    `(-alpha * gelu) * log2e`
+  The NVIDIA elementwise lowering scalarized both multiplies even on Blackwell,
+  where PTX has pairwise FP32 multiply instructions.
+
+Before PTX:
+  mul.f32 %r466, %r434, %r22;
+  mul.f32 %r467, %r435, %r22;
+  ...
+  mul.f32 %r296, %r466, 0f3FB8AA3B;
+  mul.f32 %r298, %r467, 0f3FB8AA3B;
+
+After PTX:
+  mul.f32x2 %rd152, %rd151, %rd150;
+  mul.f32x2 %rd153, %rd152, %rd149;
+
+Before SASS:
+  FMUL R63, R32, -UR20;
+  FMUL R67, R63, 1.4426950216293334961;
+
+After SASS:
+  FMUL2 R64, R32.F32x2.HI_LO, -UR20.F32;
+  FMUL2 R64, R64.F32x2.HI_LO, 1.4426950216293334961;
+
+Exactness:
+  `mul.f32x2` is only used for pairs of `f32` lanes on `sm_100+`.
+  PTX defines `f32x2` multiplication as two independent `f32`
+  multiplications, one per 32-bit lane.  Both scalar and packed spellings use
+  the default round-to-nearest-even mode, neither spelling uses `.ftz`, and
+  subnormals are supported by default on the target.  The two source
+  `arith.mulf` ops remain two separate rounded multiplies; there is no
+  reassociation or approximation change.
+
+Effect:
+  Hand-editing the emitted PTX first and reassembling it with
+  `ptxas-blackwell` reduced normalized `nvdisasm -c` lines from 1481 to 1465,
+  changed final SASS from 84 `FMUL` plus 8 `FMUL2` instructions to 52 `FMUL`
+  plus 24 `FMUL2` instructions, and reduced cubin size from 105072 to 104528
+  bytes.  Compiling the checked-in specialization from source after the
+  lowering change reproduces the same 1465-line final SASS.

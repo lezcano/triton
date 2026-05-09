@@ -1154,6 +1154,19 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shar
 
 // -----
 
+#blocked_f32x2 = #ttg.blocked<{sizePerThread = [4], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>
+module attributes {"ttg.target" = "cuda:100", "ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: @f32x2_mul
+  // CHECK: mul.f32x2
+  tt.func public @f32x2_mul(%x : tensor<1024xf32, #blocked_f32x2>, %y : tensor<1024xf32, #blocked_f32x2>, %out : tensor<1024x!tt.ptr<f32>, #blocked_f32x2>) {
+    %z = arith.mulf %x, %y : tensor<1024xf32, #blocked_f32x2>
+    tt.store %out, %z : tensor<1024x!tt.ptr<f32>, #blocked_f32x2>
+    tt.return
+  }
+}
+
+// -----
+
 // Test reduction with NaN max
 #blocked1 = #ttg.blocked<{sizePerThread = [1, 128], threadsPerWarp = [32, 1], warpsPerCTA = [4, 1], order = [0, 1]}>
 #blocked_red = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>

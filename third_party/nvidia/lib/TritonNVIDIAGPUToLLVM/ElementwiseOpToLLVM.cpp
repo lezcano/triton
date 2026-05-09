@@ -577,6 +577,56 @@ struct FDivOpConversion
   }
 };
 
+struct F32x2MulFOpConversion
+    : ElementwiseOpConversionBase<arith::MulFOp, F32x2MulFOpConversion> {
+  using Base =
+      ElementwiseOpConversionBase<arith::MulFOp, F32x2MulFOpConversion>;
+  using Base::Base;
+  using Adaptor = typename Base::OpAdaptor;
+
+  explicit F32x2MulFOpConversion(LLVMTypeConverter &typeConverter,
+                                 ModuleAxisInfoAnalysis &axisAnalysisPass,
+                                 int computeCapability,
+                                 PatternBenefit benefit = patternBenefitDefault)
+      : ElementwiseOpConversionBase(typeConverter, axisAnalysisPass, benefit),
+        computeCapability(computeCapability) {}
+
+  SmallVector<Value> createDestOps(arith::MulFOp op, OpAdaptor adaptor,
+                                   ConversionPatternRewriter &rewriter,
+                                   Type elemTy, MultipleOperandsRange operands,
+                                   Location loc) const {
+    if (computeCapability < 100 || !elemTy.isF32() ||
+        !isa<RankedTensorType>(op.getType()) ||
+        getTotalElemsPerThread(op.getType()) % 2 != 0 || operands.size() < 2)
+      return {};
+
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+    Type pairTy = vec_ty(f32_ty, 2);
+    auto packPair = [&](Value lo, Value hi) {
+      Value pair = b.undef(pairTy);
+      pair = b.insert_element(pairTy, pair, lo, b.i32_val(0));
+      pair = b.insert_element(pairTy, pair, hi, b.i32_val(1));
+      return b.bitcast(pair, i64_ty);
+    };
+
+    PTXBuilder builder;
+    auto &mul = *builder.create("mul.f32x2");
+    auto result = builder.newOperand("=l");
+    auto lhs =
+        builder.newOperand(packPair(operands[0][0], operands[1][0]), "l");
+    auto rhs =
+        builder.newOperand(packPair(operands[0][1], operands[1][1]), "l");
+    mul(result, lhs, rhs);
+    Value packed = builder.launch(rewriter, loc, i64_ty, false);
+    Value pair = b.bitcast(packed, pairTy);
+    return {b.extract_element(f32_ty, pair, b.i32_val(0)),
+            b.extract_element(f32_ty, pair, b.i32_val(1))};
+  }
+
+private:
+  int computeCapability;
+};
+
 // Uses inline ptx to convert s8/u8 to bf16, since the
 struct SIToFPOpConversion
     : ElementwiseOpConversionBase<arith::SIToFPOp, SIToFPOpConversion> {
@@ -908,6 +958,9 @@ void mlir::triton::NVIDIA::populateElementwiseOpToLLVMPatterns(
 #undef POPULATE_OP
 
   patterns.add<FDivOpConversion>(typeConverter, axisInfoAnalysis, benefit);
+  patterns.add<F32x2MulFOpConversion>(typeConverter, axisInfoAnalysis,
+                                      computeCapability,
+                                      PatternBenefit(benefit.getBenefit() + 1));
   patterns.add<FPToSIOpConversion>(typeConverter, axisInfoAnalysis, benefit);
   patterns.add<SIToFPOpConversion>(typeConverter, axisInfoAnalysis,
                                    computeCapability, benefit);
