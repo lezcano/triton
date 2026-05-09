@@ -1,0 +1,30 @@
+Reproducer:
+  python python/examples/gluon/01-attention-forward.py
+
+Target:
+  NVIDIA GB300, attention test specialization:
+  test_op[1cta-False-dtype0-False-128-1024-32-1]
+
+Issue:
+  Tensor-memory load/store lowering asks `ttg.warp_id` for the NVIDIA
+  uniformity hint even though the value is only used in the tensor-memory
+  address.  The hint lowers to `shfl.sync.idx` before each row-offset shift.
+
+Exactness:
+  `ttg.warp_id` first computes `tid / 32`.  Every lane in a warp has the same
+  quotient, so shuffling lane 0's quotient back to the warp produces the same
+  integer value.  Omitting the hint changes only the PTX spelling, not the row
+  offset added to the tensor-memory address.
+
+Before PTX:
+  shfl.sync.idx.b32 %r1891, %r3, 0, 31, -1;
+  shl.b32 %r1892, %r1891, 21;
+
+After PTX:
+  shl.b32 %r2593, %r3, 21;
+
+Effect:
+  Emitting `ttg.warp_id {omitUniformHint}` removes 6 tensor-memory-address
+  `shfl.sync.idx` instructions from this specialization.  Reassembling the
+  source-produced PTX with `ptxas` changes the final SASS instruction count
+  from 14946 to 14857.

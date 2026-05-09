@@ -365,7 +365,7 @@ std::pair<SmallVector<Value>, SmallVector<Value>> lowerTMemLdSt(
     return std::make_pair(std::get<1>(rowCol[0]), std::get<1>(rowCol[1]));
   };
 
-  Value warpId = WarpIdOp::create(rewriter, loc);
+  Value warpId = WarpIdOp::create(rewriter, loc, /*omitUniformHint=*/true);
   // Map warpId to rows 32 and 64
   Operation *lookupPt = &rewriter.getInsertionBlock()->front();
   auto warpIdInGroup = warpId;
