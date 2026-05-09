@@ -78,9 +78,9 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32} {
 
   // CHECK-LABEL: arrive_barrier
   tt.func @arrive_barrier(%alloc: !ttg.memdesc<1xi64, #shared0, #smem>) {
+    // CHECK-NEXT: nvvm.barrier0
     // CHECK-NEXT: [[BASE:%.*]] = llvm.extractvalue %arg0[0] : !llvm.struct<(ptr<3>, i32)>
     // CHECK-NEXT: llvm.extractvalue %arg0[1] : !llvm.struct<(ptr<3>, i32)>
-    // CHECK-NEXT: nvvm.barrier0
     // CHECK-NEXT: [[TID:%.*]] = nvvm.read.ptx.sreg.tid.x
     // CHECK-NEXT: [[C127:%.*]] = llvm.mlir.constant(127 : i32)
     // CHECK-NEXT: [[RTID:%.*]] = llvm.and [[TID]], [[C127]]
@@ -93,9 +93,9 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32} {
 
   // CHECK-LABEL: arrive_barrier_pred
   tt.func @arrive_barrier_pred(%alloc: !ttg.memdesc<1xi64, #shared0, #smem>, %pred: i1) {
+    // CHECK-NEXT: nvvm.barrier0
     // CHECK-NEXT: [[BASE:%.*]] = llvm.extractvalue %arg0[0] : !llvm.struct<(ptr<3>, i32)>
     // CHECK-NEXT: llvm.extractvalue %arg0[1] : !llvm.struct<(ptr<3>, i32)>
-    // CHECK-NEXT: nvvm.barrier0
     // CHECK-NEXT: [[TID:%.*]] = nvvm.read.ptx.sreg.tid.x
     // CHECK-NEXT: [[C127:%.*]] = llvm.mlir.constant(127 : i32)
     // CHECK-NEXT: [[RTID:%.*]] = llvm.and [[TID]], [[C127]]
@@ -104,6 +104,18 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32} {
     // CHECK-NEXT: [[PRED:%.*]] = llvm.and [[IS_ZERO]], %arg1
     // CHECK-NEXT: "@$0 mbarrier.arrive.shared::cta.b64 _, [$1], 2;", "b,r" [[PRED]], [[BASE]]
     ttng.arrive_barrier %alloc, 2, %pred : !ttg.memdesc<1xi64, #shared0, #smem>
+    tt.return
+  }
+
+  // CHECK-LABEL: arrive_barrier_adjacent
+  tt.func @arrive_barrier_adjacent(%alloc0: !ttg.memdesc<1xi64, #shared0, #smem>, %alloc1: !ttg.memdesc<1xi64, #shared0, #smem>, %pred: i1) {
+    // CHECK: nvvm.barrier0
+    // CHECK-NOT: nvvm.barrier0
+    // CHECK: mbarrier.arrive.shared::cta.b64
+    // CHECK-NOT: nvvm.barrier0
+    // CHECK: mbarrier.arrive.shared::cta.b64
+    ttng.arrive_barrier %alloc0, 1 : !ttg.memdesc<1xi64, #shared0, #smem>
+    ttng.arrive_barrier %alloc1, 2, %pred : !ttg.memdesc<1xi64, #shared0, #smem>
     tt.return
   }
 }

@@ -1,0 +1,39 @@
+Reproducer used during analysis:
+  the checked-in attention kernel in
+  `python/examples/gluon/01-attention-forward.py`
+
+Target:
+  NVIDIA GB300
+
+Issue:
+  The attention prologue primes its channels with 13 adjacent
+  `ttng.arrive_barrier` ops. The membar preparation previously gave each
+  operation its own partition barrier even though no work occurs between these
+  adjacent arrives.
+
+Before PTX:
+  one `bar.sync 0, 128;` before each of the 13 adjacent
+  `mbarrier.arrive.shared::cta.b64` instructions
+
+After PTX:
+  one shared `bar.sync 0, 128;` before the whole adjacent arrive run; all 13
+  `mbarrier.arrive.shared::cta.b64` instructions are preserved
+
+Before SASS:
+  65 `BAR.SYNC` instructions in the tested attention specialization
+
+After SASS:
+  51 `BAR.SYNC` instructions in the tested attention specialization
+
+Effect:
+  The adjacent prologue arrive run drops 12 redundant CTA barriers. The same
+  proof also removes one redundant barrier from each of two later adjacent
+  arrive pairs in this specialization. PTX ISA says `bar.cta.sync` waits for all
+  CTA threads to arrive, while `mbarrier.arrive` has release semantics by
+  default. With no operation between adjacent arrives, the one CTA rendezvous
+  before the run covers the same preceding work for every signal. All 43
+  `mbarrier.arrive` / `SYNCS.ARRIVE` operations remain.
+
+PTX references:
+  PTX ISA 9.7.13.1 `barrier{.cta}.sync`
+  PTX ISA 9.7.13.15.13 `mbarrier.arrive`

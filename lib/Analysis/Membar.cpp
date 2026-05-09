@@ -267,6 +267,12 @@ bool containsLocalBarrier(Operation *op) {
 void MembarAnalysis::update(Operation *op, BlockInfo *blockInfo,
                             FuncBlockInfoMapT *funcBlockInfoMap,
                             OpBuilder *builder) {
+  if (isa<ttng::ArriveBarrierOp>(op) &&
+      (!op->getPrevNode() || !containsLocalBarrier(op->getPrevNode()))) {
+    builder->setInsertionPoint(op);
+    insertBarrier(op, builder);
+  }
+
   if (containsLocalBarrier(op)) {
     // If the current op is a local barrier, we sync previous reads and writes
     blockInfo->sync();

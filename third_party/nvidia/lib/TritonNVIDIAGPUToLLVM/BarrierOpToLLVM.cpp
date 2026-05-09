@@ -330,11 +330,6 @@ struct ArriveBarrierOpConversion
         loc, adaptor.getAlloc(),
         typeConverter->convertType(barrierTy.getElementType()), rewriter);
 
-    // Arrive has block-level semantics, so we must synchronize
-    // Technically, this should be MemBar's job but it can include TMEM
-    // accesses which doesn't have a MemBar equivalent :/
-    ttg::BarrierOp::create(rewriter, loc, ttg::AddrSpace::Local);
-
     // The partition-relative thread ID lowers the same or marginally better
     // than an elect: LOP3.LUT vs. ELECT + ISETP.EQ.U32.AND.
     Value id = getThreadId(rewriter, loc);
