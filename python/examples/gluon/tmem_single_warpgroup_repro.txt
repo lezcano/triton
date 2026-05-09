@@ -1,0 +1,28 @@
+Reproducer used during analysis:
+  a small Gluon TMEM load kernel with `num_warps=4`, plus the checked-in
+  attention kernel in `python/examples/gluon/01-attention-forward.py`
+
+Target:
+  NVIDIA GB300
+
+Issue:
+  TMEM load/store lowering always masked `warpId & 3` before forming the row
+  contribution to the TMEM address. In a CTA with only four warps, `warpId` is
+  already in `[0, 3]`, so the mask is redundant.
+
+Before PTX:
+  and.b32 %r1470, %r1469, 6291456;
+
+After PTX:
+  the redundant mask is absent
+
+Before SASS:
+  ULOP3.LUT UR11, UR11, 0x600000, URZ, 0xc0, !UPT;
+
+After SASS:
+  the redundant `ULOP3.LUT` is absent
+
+Effect:
+  The checked-in attention kernel drops six TMEM address-mask instructions in
+  the tested specialization while preserving the multi-warpgroup path for CTAs
+  with more than four warps.

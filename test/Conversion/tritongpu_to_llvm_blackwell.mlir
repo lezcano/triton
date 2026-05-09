@@ -677,6 +677,7 @@ module attributes {"ttg.num-warps" = 4 : i32, ttg.maxnreg = 80 : i32, ttg.shared
 
 // CHECK-LABEL: @tmem_message_maxnreg_80
 tt.func public @tmem_message_maxnreg_80(%desc: !ttg.memdesc<128x64xf32, #tmem, #ttng.tensor_memory>) {
+  // CHECK-NOT: llvm.and
   // CHECK: tcgen05.ld.sync.aligned.32x32b.x32.b32 {{.*}} [$32 + 0]
   // CHECK: tcgen05.ld.sync.aligned.32x32b.x32.b32 {{.*}} [$32 + 32]
   // CHECK-NOT: tcgen05.ld
