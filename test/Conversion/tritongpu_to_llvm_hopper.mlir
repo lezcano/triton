@@ -600,6 +600,20 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 2 : i32, ttg.targ
 
 // -----
 
+#blocked = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "cuda:90", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @atomic_add_zero_tensor(%dest_ptrs: tensor<128x!tt.ptr<f32>, #blocked>) {
+    // CHECK-LABEL: atomic_add_zero_tensor
+    // CHECK: nvg.ld_acquire acquire, gpu
+    %zero = arith.constant dense<0.000000e+00> : tensor<128xf32, #blocked>
+    %true = arith.constant dense<true> : tensor<128xi1, #blocked>
+    %0 = tt.atomic_rmw fadd, acquire, gpu, %dest_ptrs, %zero, %true : (tensor<128x!tt.ptr<f32>, #blocked>, tensor<128xf32, #blocked>, tensor<128xi1, #blocked>) -> tensor<128xf32, #blocked>
+    tt.return
+  }
+}
+
+// -----
+
 #blocked = #ttg.blocked<{sizePerThread = [4], threadsPerWarp = [32], warpsPerCTA = [2], order = [0]}>
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 2 : i32, ttg.target = "cuda:90", "ttg.threads-per-warp" = 32 : i32} {
   tt.func public @atomic_add_f32_withmask(%dest_ptrs: tensor<256x!tt.ptr<f32>, #blocked> {tt.divisibility = 16 : i32, tt.contiguity = 16 : i32}, %data: tensor<256xf32, #blocked>, %mask: tensor<256xi1, #blocked> {tt.constancy = 2 : i32}) {

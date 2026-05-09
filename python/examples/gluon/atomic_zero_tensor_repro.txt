@@ -1,0 +1,27 @@
+Reproducer used during analysis:
+  a small Gluon kernel computing tensor
+  `gl.atomic_add(x_ptr + offs, 0.0, sem="acquire", scope="gpu")`
+
+Target:
+  NVIDIA GB300
+
+Issue:
+  Scalar zero-add atomics were already promoted to acquire loads, but the
+  NVIDIA lowering rejected tensor atomics up front, so tensor zero-add atomics
+  still emitted real atomic instructions.
+
+Before PTX:
+  atom.global.gpu.acquire.add.f32 %r2, [ %rd1 + 0 ], %r1;
+
+After PTX:
+  ld.global.gpu.acquire.b32 %r1, [ %rd1 + 0 ];
+
+Before SASS:
+  ATOMG.E.ADD.F32.FTZ.RN.STRONG.GPU PT, R9, desc[UR4][R2.64], RZ;
+
+After SASS:
+  LDG.E.STRONG.GPU R9, desc[UR4][R2.64];
+
+Effect:
+  For the 4 values handled by one thread in the repro, PTX register count
+  drops from 8 to 7 and SASS uses 4 acquire loads instead of 4 global atomics.

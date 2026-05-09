@@ -650,27 +650,29 @@ struct AtomicRMWOpConversion
 
     if (op.getAtomicRmwOp() != RMWOp::ADD && op.getAtomicRmwOp() != RMWOp::FADD)
       return false;
-    if (isa<RankedTensorType>(op.getType()))
-      return false;
     if (!op.getVal().getDefiningOp())
       return false;
     if (!isa<arith::ConstantOp>(op.getVal().getDefiningOp()))
       return false;
 
     auto constOp = cast<arith::ConstantOp>(op.getVal().getDefiningOp());
-    if (!isa<FloatAttr>(constOp.getValueAttr()) &&
-        !isa<IntegerAttr>(constOp.getValueAttr()))
-      return false;
-
     if (auto attr = dyn_cast_or_null<FloatAttr>(constOp.getValueAttr()))
-      if (!attr.getValue().isZero())
-        return false;
+      return attr.getValue().isZero();
 
     if (auto attr = dyn_cast_or_null<IntegerAttr>(constOp.getValueAttr()))
-      if (!attr.getValue().isZero())
-        return false;
+      return attr.getValue().isZero();
 
-    return true;
+    if (auto attr =
+            dyn_cast_or_null<DenseElementsAttr>(constOp.getValueAttr())) {
+      if (!attr.isSplat())
+        return false;
+      if (auto value = dyn_cast<FloatAttr>(attr.getSplatValue<Attribute>()))
+        return value.getValue().isZero();
+      if (auto value = dyn_cast<IntegerAttr>(attr.getSplatValue<Attribute>()))
+        return value.getValue().isZero();
+    }
+
+    return false;
   }
 
 public:
@@ -780,6 +782,11 @@ public:
                 ? triton::nvgpu::MemSemantic::ACQUIRE
                 : triton::nvgpu::MemSemantic::RELAXED,
             ScopeMap[op.getScope()]);
+
+        if (tensorTy) {
+          resultVals[i] = loadAcquireOp;
+          continue;
+        }
 
         if (op.getResult().use_empty()) {
           rewriter.eraseOp(op);
