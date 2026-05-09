@@ -98,6 +98,63 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 2 : i32, "ttg.thr
     tt.return
   }
 
+  tt.func public @key_to_fpval_i16(%ptr: !tt.ptr<i16> {tt.divisibility = 16 : i32}, %arg0: tensor<256xi16, #blocked>) {
+    // CHECK-LABEL: key_to_fpval_i16
+    // CHECK-COUNT-4: prmt.b32 {{.*}}0xbb99
+    %top = arith.constant dense<-32768> : tensor<256xi16, #blocked>
+    %full = arith.constant dense<-1> : tensor<256xi16, #blocked>
+    %zero = arith.constant dense<0> : tensor<256xi32, #blocked>
+    %sign = arith.andi %arg0, %top : tensor<256xi16, #blocked>
+    %wide = arith.extui %sign : tensor<256xi16, #blocked> to tensor<256xi32, #blocked>
+    %is_positive = arith.cmpi eq, %wide, %zero : tensor<256xi32, #blocked>
+    %mask = arith.select %is_positive, %full, %top : tensor<256xi1, #blocked>, tensor<256xi16, #blocked>
+    %decoded = arith.xori %arg0, %mask : tensor<256xi16, #blocked>
+    %1 = tt.make_range {end = 256 : i32, start = 0 : i32} : tensor<256xi32, #blocked>
+    %2 = tt.splat %ptr : !tt.ptr<i16> -> tensor<256x!tt.ptr<i16>, #blocked>
+    %3 = tt.addptr %2, %1 : tensor<256x!tt.ptr<i16>, #blocked>, tensor<256xi32, #blocked>
+    tt.store %3, %decoded : tensor<256x!tt.ptr<i16>, #blocked>
+    tt.return
+  }
+
+  tt.func public @fpval_to_key_i16(%ptr: !tt.ptr<i16> {tt.divisibility = 16 : i32}, %arg0: tensor<256xi16, #blocked>) {
+    // CHECK-LABEL: fpval_to_key_i16
+    // CHECK-COUNT-4: prmt.b32 {{.*}}0xbb99
+    %top = arith.constant dense<-32768> : tensor<256xi16, #blocked>
+    %full = arith.constant dense<-1> : tensor<256xi16, #blocked>
+    %zero = arith.constant dense<0> : tensor<256xi32, #blocked>
+    %sign = arith.andi %arg0, %top : tensor<256xi16, #blocked>
+    %wide = arith.extui %sign : tensor<256xi16, #blocked> to tensor<256xi32, #blocked>
+    %is_negative = arith.cmpi ne, %wide, %zero : tensor<256xi32, #blocked>
+    %mask = arith.select %is_negative, %full, %top : tensor<256xi1, #blocked>, tensor<256xi16, #blocked>
+    %key = arith.xori %arg0, %mask : tensor<256xi16, #blocked>
+    %1 = tt.make_range {end = 256 : i32, start = 0 : i32} : tensor<256xi32, #blocked>
+    %2 = tt.splat %ptr : !tt.ptr<i16> -> tensor<256x!tt.ptr<i16>, #blocked>
+    %3 = tt.addptr %2, %1 : tensor<256x!tt.ptr<i16>, #blocked>, tensor<256xi32, #blocked>
+    tt.store %3, %key : tensor<256x!tt.ptr<i16>, #blocked>
+    tt.return
+  }
+
+  tt.func public @fpval_to_key_extui_i16(%ptr: !tt.ptr<i32> {tt.divisibility = 16 : i32}, %arg0: tensor<256xi16, #blocked>) {
+    // CHECK-LABEL: fpval_to_key_extui_i16
+    // CHECK-COUNT-4: prmt.b32 {{.*}}0xbb99
+    // CHECK-COUNT-4: shr.u32
+    // CHECK-NOT: cvt.u32.u16
+    %top = arith.constant dense<-32768> : tensor<256xi16, #blocked>
+    %full = arith.constant dense<-1> : tensor<256xi16, #blocked>
+    %zero = arith.constant dense<0> : tensor<256xi32, #blocked>
+    %sign = arith.andi %arg0, %top : tensor<256xi16, #blocked>
+    %wide = arith.extui %sign : tensor<256xi16, #blocked> to tensor<256xi32, #blocked>
+    %is_negative = arith.cmpi ne, %wide, %zero : tensor<256xi32, #blocked>
+    %mask = arith.select %is_negative, %full, %top : tensor<256xi1, #blocked>, tensor<256xi16, #blocked>
+    %key = arith.xori %arg0, %mask : tensor<256xi16, #blocked>
+    %key_wide = arith.extui %key : tensor<256xi16, #blocked> to tensor<256xi32, #blocked>
+    %1 = tt.make_range {end = 256 : i32, start = 0 : i32} : tensor<256xi32, #blocked>
+    %2 = tt.splat %ptr : !tt.ptr<i32> -> tensor<256x!tt.ptr<i32>, #blocked>
+    %3 = tt.addptr %2, %1 : tensor<256x!tt.ptr<i32>, #blocked>, tensor<256xi32, #blocked>
+    tt.store %3, %key_wide : tensor<256x!tt.ptr<i32>, #blocked>
+    tt.return
+  }
+
   // CHECK-LABEL: reduce_f16_store
   // SM80-NOT: add.rn.f16x2
   // SM90: add.rn.f16x2

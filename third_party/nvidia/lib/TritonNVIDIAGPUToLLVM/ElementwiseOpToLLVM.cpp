@@ -3,6 +3,7 @@
 #include "TritonNVIDIAGPUToLLVM/PTXAsmFormat.h"
 #include "Utility.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/Support/LLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/ElementwiseOpToLLVMBase.h"
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
@@ -658,6 +659,121 @@ private:
   int computeCapability;
 };
 
+static bool isIntConstant(Value value, const APInt &expected) {
+  Attribute attr;
+  if (!matchPattern(value, m_Constant(&attr)))
+    return false;
+  if (auto intAttr = dyn_cast<IntegerAttr>(attr))
+    return intAttr.getValue() == expected;
+  if (auto dense = dyn_cast<DenseIntElementsAttr>(attr))
+    return dense.isSplat() && dense.getSplatValue<APInt>() == expected;
+  return false;
+}
+
+static std::optional<bool> needsInvertedHalfwordSignFill(arith::XOrIOp op) {
+  auto select = op.getRhs().getDefiningOp<arith::SelectOp>();
+  if (!select || !isIntConstant(select.getTrueValue(), APInt(16, 0xffff)) ||
+      !isIntConstant(select.getFalseValue(), APInt(16, 0x8000)))
+    return std::nullopt;
+
+  auto cmp = select.getCondition().getDefiningOp<arith::CmpIOp>();
+  if (!cmp ||
+      (cmp.getPredicate() != arith::CmpIPredicate::eq &&
+       cmp.getPredicate() != arith::CmpIPredicate::ne) ||
+      !isIntConstant(cmp.getRhs(), APInt(32, 0)))
+    return std::nullopt;
+
+  auto extui = cmp.getLhs().getDefiningOp<arith::ExtUIOp>();
+  if (!extui)
+    return std::nullopt;
+
+  auto signBit = extui.getIn().getDefiningOp<arith::AndIOp>();
+  if (!signBit || signBit.getLhs() != op.getLhs() ||
+      !isIntConstant(signBit.getRhs(), APInt(16, 0x8000)))
+    return std::nullopt;
+
+  return cmp.getPredicate() == arith::CmpIPredicate::eq;
+}
+
+static Value packHalfwordPair(Location loc, ConversionPatternRewriter &rewriter,
+                              Value lo, Value hi) {
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  Type pairTy = vec_ty(i16_ty, 2);
+  Value pair = b.undef(pairTy);
+  pair = b.insert_element(pairTy, pair, lo, b.i32_val(0));
+  pair = b.insert_element(pairTy, pair, hi, b.i32_val(1));
+  return b.bitcast(pair, i32_ty);
+}
+
+// Map pairs of halfwords to or from monotonic sort keys with one packed sign
+// extract.  Generic `prmt` can sign-replicate both packed halfwords in one
+// instruction; the forward transform uses `signfill(x) | 0x8000`, while the
+// inverse transform uses `~signfill(x) | 0x8000`.
+struct PackedHalfwordSignMaskXorOpConversion
+    : ElementwiseOpConversionBase<arith::XOrIOp,
+                                  PackedHalfwordSignMaskXorOpConversion> {
+  using Base =
+      ElementwiseOpConversionBase<arith::XOrIOp,
+                                  PackedHalfwordSignMaskXorOpConversion>;
+  using Base::Base;
+  using Adaptor = typename Base::OpAdaptor;
+
+  SmallVector<Value> createDestOps(arith::XOrIOp op, Adaptor adaptor,
+                                   ConversionPatternRewriter &rewriter,
+                                   Type elemTy, MultipleOperandsRange operands,
+                                   Location loc) const {
+    auto invertSignFill = needsInvertedHalfwordSignFill(op);
+    if (!elemTy.isInteger(16) || !isa<RankedTensorType>(op.getType()) ||
+        getTotalElemsPerThread(op.getType()) % 2 != 0 || operands.size() < 2 ||
+        !invertSignFill)
+      return {};
+
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+    Type pairTy = vec_ty(i16_ty, 2);
+    Value packed =
+        packHalfwordPair(loc, rewriter, operands[0][0], operands[1][0]);
+
+    Value signFill =
+        LLVM::NVIDIA::permute(loc, rewriter, packed, packed, b.i32_val(0xbb99));
+    if (*invertSignFill)
+      signFill = b.xor_(signFill, b.i32_val(-1));
+    Value mask = b.or_(signFill, b.i32_val(0x80008000));
+    Value decoded = b.xor_(packed, mask);
+    Value decodedPair = b.bitcast(decoded, pairTy);
+    return {b.extract_element(i16_ty, decodedPair, b.i32_val(0)),
+            b.extract_element(i16_ty, decodedPair, b.i32_val(1))};
+  }
+};
+
+// Keep monotonic sort-key results packed while zero-extending them.  The paired
+// extui users immediately feed integer index arithmetic in top-k, and `(zext
+// lo, zext hi)` is exactly `(packed & 0xffff, packed >> 16)`.
+struct PackedHalfwordSignMaskExtUIOpConversion
+    : ElementwiseOpConversionBase<arith::ExtUIOp,
+                                  PackedHalfwordSignMaskExtUIOpConversion> {
+  using Base =
+      ElementwiseOpConversionBase<arith::ExtUIOp,
+                                  PackedHalfwordSignMaskExtUIOpConversion>;
+  using Base::Base;
+  using Adaptor = typename Base::OpAdaptor;
+
+  SmallVector<Value> createDestOps(arith::ExtUIOp op, Adaptor adaptor,
+                                   ConversionPatternRewriter &rewriter,
+                                   Type elemTy, MultipleOperandsRange operands,
+                                   Location loc) const {
+    auto xorOp = op.getIn().getDefiningOp<arith::XOrIOp>();
+    if (!elemTy.isInteger(32) || !isa<RankedTensorType>(op.getType()) ||
+        getTotalElemsPerThread(op.getType()) % 2 != 0 || operands.size() < 2 ||
+        !xorOp || !needsInvertedHalfwordSignFill(xorOp))
+      return {};
+
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+    Value packed =
+        packHalfwordPair(loc, rewriter, operands[0][0], operands[1][0]);
+    return {b.and_(packed, b.i32_val(0xffff)), b.lshr(packed, b.i32_val(16))};
+  }
+};
+
 // Uses inline ptx to convert s8/u8 to bf16, since the
 struct SIToFPOpConversion
     : ElementwiseOpConversionBase<arith::SIToFPOp, SIToFPOpConversion> {
@@ -992,6 +1108,12 @@ void mlir::triton::NVIDIA::populateElementwiseOpToLLVMPatterns(
   patterns.add<F32x2MulFOpConversion>(typeConverter, axisInfoAnalysis,
                                       computeCapability,
                                       PatternBenefit(benefit.getBenefit() + 1));
+  patterns.add<PackedHalfwordSignMaskXorOpConversion>(
+      typeConverter, axisInfoAnalysis,
+      PatternBenefit(benefit.getBenefit() + 1));
+  patterns.add<PackedHalfwordSignMaskExtUIOpConversion>(
+      typeConverter, axisInfoAnalysis,
+      PatternBenefit(benefit.getBenefit() + 1));
   patterns.add<FPToSIOpConversion>(typeConverter, axisInfoAnalysis, benefit);
   patterns.add<SIToFPOpConversion>(typeConverter, axisInfoAnalysis,
                                    computeCapability, benefit);

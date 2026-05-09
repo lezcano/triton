@@ -1,0 +1,53 @@
+Reproducer:
+  python python/examples/gluon/05-moe-bmm1-fused-gather.py
+
+Target:
+  NVIDIA GB300, checked with `test_op[128-c0]`
+
+Issue:
+  `_topk_forward` maps fp16 values to and from monotonic sort keys with
+  halfword sign masks:
+    fpval_to_key: x ^ where((x & 0x8000) != 0, 0xffff, 0x8000)
+    key_to_fpval: x ^ where((x & 0x8000) == 0, 0xffff, 0x8000)
+  Lowering the i16 lanes independently emits compares and halfword selects
+  even though each packed pair can derive both sign masks from one byte
+  permute.
+
+Before PTX:
+  setp.gt.s32 %p171, %r542, -1;
+  setp.gt.s32 %p172, %r543, -1;
+  setp.gt.s32 %p173, %r540, -1;
+  setp.gt.s32 %p174, %r541, -1;
+  selp.b16 %rs3, -1, -32768, %p174;
+
+After PTX, key_to_fpval:
+  prmt.b32 %r546, %r544, 0, 0xbb99U;
+  not.b32 %r547, %r546;
+  or.b32 %r548, %r547, -2147450880;
+
+After PTX, fpval_to_key:
+  prmt.b32 %r48, %r8, 0, 0xbb99U;
+  or.b32 %r52, %r48, -2147450880;
+  xor.b32 %r64, %r52, %r8;
+
+Before SASS:
+  ISETP.GT.AND P1, PT, R2, -0x1, PT;
+  ISETP.GT.AND P0, PT, R3, -0x1, PT;
+  SEL R7, R15.reuse, 0xffff, !P1;
+  SEL R8, R15, 0xffff, !P0;
+
+After SASS:
+  PRMT R8, R7.reuse, 0xbb99, RZ;
+  PRMT R9, R6.reuse, 0xbb99, RZ;
+  LOP3.LUT R8, R7, 0x80008000, R8, 0x2d, !PT;
+  LOP3.LUT R9, R6, 0x80008000, R9, 0x2d, !PT;
+
+Exactness:
+  Generic `prmt` selector `0xbb99` sign-replicates the high byte of each
+  packed halfword.  For each i16 half, `signfill(x) | 0x8000` is exactly
+  `0xffff` when the sign bit is set and `0x8000` when it is clear; inverting
+  `signfill(x)` gives the exact inverse mask.
+
+Effect:
+  For `test_op[128-c0]`, PTX line count drops from 1852 to 1771 and final
+  SASS drops from 745 to 686 non-padding instructions.
