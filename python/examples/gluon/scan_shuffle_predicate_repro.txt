@@ -1,0 +1,54 @@
+Reproducer used during analysis:
+  the checked-in MoE specialization in
+  `python/examples/gluon/05-moe-bmm1-fused-gather.py`:
+  `test_op[128-c0]`
+
+Target:
+  NVIDIA GB300
+
+Issue:
+  Contiguous-lane scan lowering rebuilt lane-validity predicates around
+  `shfl.sync.up` even though PTX can return the same in-range predicate as a
+  second destination. The lowering only uses the hardware predicate when the
+  scan axis consumes the full warp and advances by one physical lane, so the
+  logical scan lane is exactly the physical lane id.
+
+Before PTX:
+  setp.gt.u32      %p35, %r5, 1;
+  shfl.sync.up.b32 %r126, %r125, 2, 0, -1;
+  selp.b32         %r127, %r126, 0, %p35;
+
+After PTX:
+  shfl.sync.up.b32 %r126|%p35, %r125, 2, 0, -1;
+  selp.b32         %r127, %r126, 0, %p35;
+
+For the first-lane form, the lowering keeps the same value by swapping the
+`selp` operands to consume the non-first-lane predicate directly:
+
+  Before:
+    setp.eq.b32      %p36, %r5, 0;
+    shfl.sync.up.b32 %r123, %r122, 1, 0, -1;
+    selp.b32         %r124, 0, %r123, %p36;
+
+  After:
+    shfl.sync.up.b32 %r123|%p36, %r122, 1, 0, -1;
+    selp.b32         %r124, %r123, 0, %p36;
+
+Effect:
+  Hand-editing the emitted PTX first and assembling it with
+  `ptxas-blackwell` reduced final SASS lines from 290 to 250 in
+  `_bitmatrix_metadata_compute_stage1` and from 322 to 314 in
+  `_bitmatrix_metadata_compute_stage2`. With both PTX overrides active, the
+  checked-in MoE test still passed and its metadata matched the torch reference
+  bit for bit. Rebuilding from source after the lowering change emits the same
+  predicate-destination form; the direct metadata check still reports
+  `metadata_bitwise_equal`, and the checked-in MoE test still passes.
+
+Correctness:
+  PTX ISA 9.2 states that `shfl.sync` may write an optional predicate
+  destination and that, for `.up`, it is true exactly when the computed source
+  lane is in range. When the scan axis uses every lane in the warp and
+  `threadStride == 1`, `laneIdAxis` is the physical lane id, so the hardware
+  predicate is exactly the predicate the scan lowering previously rebuilt as
+  `laneIdAxis >= shift`; shift one is the exact complement of
+  `laneIdAxis == 0`.

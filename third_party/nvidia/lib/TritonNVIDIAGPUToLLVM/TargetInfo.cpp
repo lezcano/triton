@@ -461,6 +461,12 @@ Value TargetInfo::shuffleUp(RewriterBase &rewriter, Location loc, Value val,
   return LLVM::NVIDIA::shuffleUp(loc, rewriter, val, i);
 }
 
+std::optional<std::pair<Value, Value>>
+TargetInfo::shuffleUpWithPredicate(RewriterBase &rewriter, Location loc,
+                                   Value val, int i) const {
+  return LLVM::NVIDIA::shuffleUpWithPredicate(loc, rewriter, val, i);
+}
+
 Value TargetInfo::shuffleIdx(RewriterBase &rewriter, Location loc, Value val,
                              int i) const {
   return LLVM::NVIDIA::shuffleIdx(loc, rewriter, val, i);

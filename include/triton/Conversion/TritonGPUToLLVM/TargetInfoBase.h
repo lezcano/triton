@@ -57,6 +57,13 @@ public:
                            int i) const = 0;
   virtual Value shuffleUp(RewriterBase &rewriter, Location loc, Value val,
                           int i) const = 0;
+  // Returns the shuffled value and, when the target exposes it, a predicate
+  // telling whether the source lane was in range.
+  virtual std::optional<std::pair<Value, Value>>
+  shuffleUpWithPredicate(RewriterBase &rewriter, Location loc, Value val,
+                         int i) const {
+    return std::nullopt;
+  }
   virtual Value shuffleIdx(RewriterBase &rewriter, Location loc, Value val,
                            int i) const = 0;
   virtual Value shuffleIdx(RewriterBase &rewriter, Location loc, Value val,

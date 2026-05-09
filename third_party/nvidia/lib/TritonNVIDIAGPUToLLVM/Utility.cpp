@@ -70,6 +70,47 @@ Value shuffleUp(Location loc, RewriterBase &rewriter, Value val, int i) {
                        b.i32_val(0x0));
 }
 
+std::optional<std::pair<Value, Value>>
+shuffleUpWithPredicate(Location loc, RewriterBase &rewriter, Value val, int i) {
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  auto *ctx = rewriter.getContext();
+  Type type = val.getType();
+  if (isa<LLVM::LLVMPointerType>(type) || type.getIntOrFloatBitWidth() > 32)
+    return std::nullopt;
+
+  unsigned bits = type.getIntOrFloatBitWidth();
+  if (type != i32_ty) {
+    val = b.bitcast(val, int_ty(bits));
+    if (bits < 32)
+      val = b.zext(i32_ty, val);
+  }
+
+  PTXBuilder builder;
+  auto *resultOpr = builder.newOperand("=r");
+  auto *predOpr = builder.newOperand("=b");
+  resultOpr->repr = [predOpr](int idx) {
+    return "$" + std::to_string(idx) + "|$" + std::to_string(predOpr->idx);
+  };
+  auto *valOpr = builder.newOperand(val, "r");
+  auto *offsetOpr = builder.newConstantOperand(i);
+  auto *clampOpr = builder.newConstantOperand(0);
+  auto *maskOpr = builder.newConstantOperand(0xFFFFFFFF);
+  builder.create("shfl.sync.up")
+      ->o("b32")(resultOpr, valOpr, offsetOpr, clampOpr, maskOpr);
+
+  Type resultTy = struct_ty({i32_ty, i1_ty});
+  Value result = builder.launch(rewriter, loc, resultTy,
+                                /*hasSideEffect=*/false);
+  Value shuffled = b.extract_val(i32_ty, result, 0);
+  Value pred = b.extract_val(i1_ty, result, 1);
+  if (type != i32_ty) {
+    if (bits < 32)
+      shuffled = b.trunc(int_ty(bits), shuffled);
+    shuffled = b.bitcast(shuffled, type);
+  }
+  return std::make_pair(shuffled, pred);
+}
+
 Value shuffleIdx(Location loc, RewriterBase &rewriter, Value val, int i) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   return shuffleIdx(loc, rewriter, val, b.i32_val(i));

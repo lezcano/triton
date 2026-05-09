@@ -60,6 +60,9 @@ static void warpScan(SmallVector<SmallVector<Value>> &srcValues,
   unsigned elementStride = helper.getAxisElementStride();
   unsigned threadStride = helper.getAxisThreadStride();
   unsigned scanDim = helper.getAxisNumThreadsPerWarpWithUniqueData();
+  bool laneIdAxisIsLaneId =
+      threadStride == 1 &&
+      scanDim == triton::gpu::lookupThreadsPerWarp(rewriter);
   for (unsigned srcIndex = 0; srcIndex < srcValues.size(); srcIndex++) {
     unsigned elementIdx = (srcIndex / elementStride) % scanElementsPerThreads;
     // Only consider the last element of each contiguous chunk of elements.
@@ -69,10 +72,20 @@ static void warpScan(SmallVector<SmallVector<Value>> &srcValues,
     SmallVector<Value> acc = srcValues[srcIndex];
     for (unsigned i = 1; i <= scanDim / 2; i <<= 1) {
       SmallVector<Value> shfl(acc.size());
+      Value mask;
       for (unsigned j = 0; j < acc.size(); ++j) {
+        if (!mask && laneIdAxisIsLaneId) {
+          if (auto shflAndPred = targetInfo.shuffleUpWithPredicate(
+                  rewriter, loc, acc[j], i * threadStride)) {
+            shfl[j] = shflAndPred->first;
+            mask = shflAndPred->second;
+            continue;
+          }
+        }
         shfl[j] = targetInfo.shuffleUp(rewriter, loc, acc[j], i * threadStride);
       }
-      Value mask = b.icmp_sge(laneIdAxis, b.i32_val(i));
+      if (!mask)
+        mask = b.icmp_sge(laneIdAxis, b.i32_val(i));
       SmallVector<Value> tempAcc =
           accumulate(helper, rewriter, shfl, acc, mask);
       for (unsigned j = 0; j < acc.size(); ++j) {
@@ -145,6 +158,9 @@ static void AddPartialReduce(SmallVector<SmallVector<Value>> &srcValues,
   unsigned elementStride = helper.getAxisElementStride();
   unsigned threadStride = helper.getAxisThreadStride();
   unsigned axisNumWarps = helper.getAxisNumWarpsWithUniqueData();
+  bool laneIdAxisIsLaneId =
+      threadStride == 1 && helper.getAxisNumThreadsPerWarpWithUniqueData() ==
+                               triton::gpu::lookupThreadsPerWarp(rewriter);
   Value maskNotFirstWarp = b.icmp_ne(warpId, b.i32_val(0));
   Value maskNotFirstLane = b.icmp_ne(laneIdAxis, b.i32_val(0));
   Value maskNotFirstThread = b.or_(maskNotFirstWarp, maskNotFirstLane);
@@ -218,6 +234,14 @@ static void AddPartialReduce(SmallVector<SmallVector<Value>> &srcValues,
     // Update the rest of the contiguous elements.
     SmallVector<Value> lastElement(helper.getNumOperands());
     for (unsigned i = 0; i < helper.getNumOperands(); ++i) {
+      if (laneIdAxisIsLaneId) {
+        if (auto shflAndPred = targetInfo.shuffleUpWithPredicate(
+                rewriter, loc, temp[i], threadStride)) {
+          lastElement[i] = b.select(shflAndPred->second, shflAndPred->first,
+                                    accumulator.maskedAcc[i]);
+          continue;
+        }
+      }
       auto elem = targetInfo.shuffleUp(rewriter, loc, temp[i], threadStride);
       lastElement[i] =
           b.select(maskNotFirstLane, elem, accumulator.maskedAcc[i]);
@@ -255,6 +279,9 @@ static void AddPartialReduceOneWarp(SmallVector<SmallVector<Value>> &srcValues,
   unsigned elementStride = helper.getAxisElementStride();
   unsigned threadStride = helper.getAxisThreadStride();
   unsigned scanDim = helper.getAxisNumThreadsPerWarpWithUniqueData();
+  bool laneIdAxisIsLaneId =
+      threadStride == 1 &&
+      scanDim == triton::gpu::lookupThreadsPerWarp(rewriter);
   Value maskFirstWarp = b.icmp_eq(warpId, b.i32_val(0));
   Value maskFirstLane = b.icmp_eq(laneIdAxis, b.i32_val(0));
   Value maskFirstThread = b.and_(maskFirstWarp, maskFirstLane);
@@ -289,10 +316,23 @@ static void AddPartialReduceOneWarp(SmallVector<SmallVector<Value>> &srcValues,
     auto lastElement = srcValues[srcIndex];
     if (scanDim > 1) {
       for (unsigned i = 0; i < helper.getNumOperands(); ++i) {
-        lastElement[i] = targetInfo.shuffleUp(
-            rewriter, loc, srcValues[srcIndex][i], threadStride);
-        lastElement[i] =
-            b.select(maskFirstLane, accumulator[i], lastElement[i]);
+        if (laneIdAxisIsLaneId) {
+          if (auto shflAndPred = targetInfo.shuffleUpWithPredicate(
+                  rewriter, loc, srcValues[srcIndex][i], threadStride)) {
+            lastElement[i] = b.select(shflAndPred->second, shflAndPred->first,
+                                      accumulator[i]);
+          } else {
+            lastElement[i] = targetInfo.shuffleUp(
+                rewriter, loc, srcValues[srcIndex][i], threadStride);
+            lastElement[i] =
+                b.select(maskFirstLane, accumulator[i], lastElement[i]);
+          }
+        } else {
+          lastElement[i] = targetInfo.shuffleUp(
+              rewriter, loc, srcValues[srcIndex][i], threadStride);
+          lastElement[i] =
+              b.select(maskFirstLane, accumulator[i], lastElement[i]);
+        }
         if (numScanBlocks > 1)
           // Update accumulator with the value from the last lane.
           accumulator[i] = targetInfo.shuffleIdx(
