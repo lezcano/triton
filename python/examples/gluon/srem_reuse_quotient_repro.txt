@@ -1,0 +1,39 @@
+Reproducer used during analysis:
+  the checked-in fprop specialization in
+  `python/examples/gluon/02-conv-fprop.py`:
+  `test_op[conv2d_fprop_fixed-1-384-64-64-384-3-3-1-0]`
+
+Target:
+  NVIDIA GB300
+
+Issue:
+  The fprop epilogue delinearizes output coordinates with paired signed
+  quotient/remainder operations.  LLVM lowered the remainders independently,
+  so PTX paid for `rem.s32` even when the same block already needed the exact
+  matching quotient.
+
+Before PTX:
+  div.s32 %r649, %r648, %r61;
+  rem.s32 %r652, %r648, %r650;
+  rem.s32 %r653, %r649, %r651;
+
+After PTX:
+  div.s32    %r661, %r639, %r61;
+  mad.lo.s32 %r662, %r661, %r52, %r639;
+  div.s32    %r693, %r661, %r60;
+  mad.lo.s32 %r694, %r693, %r53, %r661;
+
+Correctness:
+  For every defined signed division, `srem(x, d) == x - sdiv(x, d) * d`.
+  The custom lowering only fires when the same block already contains a
+  matching `arith.divsi` with the same operands.  It still lowers one
+  `arith.remsi` at a time, and leaves unmatched remainders on the existing
+  `llvm.srem` path.  Division by zero and signed-overflow cases are already
+  undefined for the original `srem`.
+
+Effect:
+  Hand-editing the emitted PTX first for the two repeated coordinate families
+  reduced executable SASS from 1832 to 1680 instructions.  Rebuilding from the
+  source lowering emits common negated divisors plus `mad.lo.s32` remainders
+  and reduces the checked-in specialization from 1832 to 1688 executable SASS
+  instructions.

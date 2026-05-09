@@ -501,6 +501,37 @@ struct SelectOpConversion
                                    adaptor.getAttributes().getValue())};
   }
 };
+
+struct RemSIOpConversion
+    : ElementwiseOpConversionBase<arith::RemSIOp, RemSIOpConversion> {
+  using Base = ElementwiseOpConversionBase<arith::RemSIOp, RemSIOpConversion>;
+  using Base::Base;
+  using Adaptor = typename Base::OpAdaptor;
+
+  SmallVector<Value> createDestOps(arith::RemSIOp op, Adaptor adaptor,
+                                   ConversionPatternRewriter &rewriter,
+                                   Type elemTy, MultipleOperandsRange operands,
+                                   Location loc) const {
+    bool hasMatchingQuotient = llvm::any_of(
+        op->getBlock()->getOps<arith::DivSIOp>(), [&](arith::DivSIOp div) {
+          return div.getLhs() == op.getLhs() && div.getRhs() == op.getRhs();
+        });
+    if (!hasMatchingQuotient)
+      return {LLVM::SRemOp::create(rewriter, loc, elemTy, operands[0],
+                                   adaptor.getAttributes().getValue())};
+
+    // `srem(x, d) == x - sdiv(x, d) * d` for every defined signed division.
+    // Reusing a quotient that the block already needs avoids a second divide.
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+    Value quotient = LLVM::SDivOp::create(rewriter, loc, elemTy, operands[0],
+                                          adaptor.getAttributes().getValue());
+    Value zero = LLVM::createLLVMIntegerConstant(
+        rewriter, loc, elemTy.getIntOrFloatBitWidth(), 0);
+    Value negDenominator = b.sub(zero, operands[0][1]);
+    return {b.add(operands[0][0], b.mul(quotient, negDenominator))};
+  }
+};
+
 template <typename OpTy>
 struct MinMaxFOpConversion
     : ElementwiseOpConversionBase<OpTy, MinMaxFOpConversion<OpTy>> {
@@ -735,7 +766,6 @@ void mlir::triton::populateElementwiseOpToLLVMPatterns(
   POPULATE_BINARY_OP(arith::DivSIOp, LLVM::SDivOp)
   POPULATE_BINARY_OP(arith::DivUIOp, LLVM::UDivOp)
   POPULATE_BINARY_OP(arith::RemFOp, LLVM::FRemOp) // %
-  POPULATE_BINARY_OP(arith::RemSIOp, LLVM::SRemOp)
   POPULATE_BINARY_OP(arith::RemUIOp, LLVM::URemOp)
   POPULATE_BINARY_OP(arith::AndIOp, LLVM::AndOp)   // &
   POPULATE_BINARY_OP(arith::OrIOp, LLVM::OrOp)     // |
@@ -767,5 +797,6 @@ void mlir::triton::populateElementwiseOpToLLVMPatterns(
   patterns.add<AbsIOpConversion>(typeConverter, axisInfoAnalysis, benefit);
   patterns.add<AbsFOpConversion>(typeConverter, axisInfoAnalysis, benefit);
   patterns.add<SelectOpConversion>(typeConverter, axisInfoAnalysis, benefit);
+  patterns.add<RemSIOpConversion>(typeConverter, axisInfoAnalysis, benefit);
   patterns.add<MapElementwiseOpConversion>(typeConverter, benefit);
 }
