@@ -7,7 +7,9 @@ Target:
 Issue:
   Gluon spells `-limit` as `arith.negf %limit`. The Hopper+ clamp fast path
   recognized `0 - limit` and symmetric constants, but not `negf limit`, so
-  `gl.clamp(x, -limit, limit)` missed the fused lowering.
+  `gl.clamp(x, -limit, limit)` missed the fused lowering. The checked-in MoE
+  `_p_matmul` Swiglu path has the same clip after scalar limits are splatted:
+  `tt.clampf %x, splat(negf %limit), splat(%limit)`.
 
 Before PTX:
   neg.f32 %r15, %r5;
@@ -27,4 +29,8 @@ After SASS:
 Effect:
   For the 4 values handled by one thread in the repro, PTX register count
   drops from 23 to 15 and SASS uses 4 `FMNMX.XORSIGN` instructions instead of
-  8 plain `FMNMX` instructions.
+  8 plain `FMNMX` instructions. For the checked-in MoE `_p_matmul` clip,
+  hand-editing the emitted PTX first and assembling it with CUDA 13.1 `ptxas`
+  reduced final SASS instructions from 1512 to 1496 and the cubin size from
+  109128 to 108416 bytes. The splatted form is bitwise the same clip because
+  both bounds come from the same scalar `limit` before elementwise splatting.

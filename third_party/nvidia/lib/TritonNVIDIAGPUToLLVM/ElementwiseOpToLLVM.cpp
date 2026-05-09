@@ -669,6 +669,18 @@ static std::optional<double> getSplatInitializer(Value value) {
   return std::nullopt;
 }
 
+static bool hasNegatedLimit(Value lower, Value upper) {
+  if (auto negOp = lower.getDefiningOp<arith::NegFOp>())
+    return negOp.getOperand() == upper;
+
+  auto lowerSplat = lower.getDefiningOp<SplatOp>();
+  auto upperSplat = upper.getDefiningOp<SplatOp>();
+  if (!lowerSplat || !upperSplat)
+    return false;
+  auto negOp = lowerSplat.getSrc().getDefiningOp<arith::NegFOp>();
+  return negOp && negOp.getOperand() == upperSplat.getSrc();
+}
+
 struct ClampFOpConversion
     : ElementwiseOpConversionBase<ClampFOp, ClampFOpConversion> {
   using Base = ElementwiseOpConversionBase<ClampFOp, ClampFOpConversion>;
@@ -702,11 +714,8 @@ struct ClampFOpConversion
     //   %160 = tt.clamp %158, %cst_6, %cst_7
 
     // clampf %x (negf %max) %max
-    if (auto negOp = op.getOperand(1).getDefiningOp<arith::NegFOp>()) {
-      if (negOp.getOperand() == op.getOperand(2)) {
-        return true;
-      }
-    }
+    if (hasNegatedLimit(op.getOperand(1), op.getOperand(2)))
+      return true;
 
     // clampf %x (sub 0.0 %max) %max
     if (auto subOp = op.getOperand(1).getDefiningOp<arith::SubFOp>()) {
@@ -787,9 +796,7 @@ struct SymmetricMinMaxFOpConversion : ConvertOpToLLVMPattern<arith::MinNumFOp> {
     if (!maxOp)
       return failure();
 
-    bool hasSymmetricLimit = false;
-    if (auto negOp = maxOp.getRhs().getDefiningOp<arith::NegFOp>())
-      hasSymmetricLimit = negOp.getOperand() == op.getRhs();
+    bool hasSymmetricLimit = hasNegatedLimit(maxOp.getRhs(), op.getRhs());
     auto lowerInitializer = getSplatInitializer(maxOp.getRhs());
     auto upperInitializer = getSplatInitializer(op.getRhs());
     hasSymmetricLimit |= lowerInitializer.has_value() &&
