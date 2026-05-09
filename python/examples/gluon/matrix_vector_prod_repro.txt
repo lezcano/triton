@@ -5,6 +5,9 @@ Reproducers used during analysis:
   checked-in wgrad specialization:
     `python/examples/gluon/02-conv-wgrad.py`:
     `test_op[conv2d_wgrad_fixed-1-128-64-64-128-1-1-1-0]`
+  checked-in MoE specialization:
+    `python/examples/gluon/05-moe-bmm1-fused-gather.py`:
+    `test_op[128-c0]`
 
 Target:
   NVIDIA GB300
@@ -100,12 +103,110 @@ After SASS:
   left-shift term is `s << 11`. Their output rows are disjoint, so
   `(s << 4) xor (s << 11)` is exactly `s * (16 + 2048)`.
 
+MoE reversed one-hot run:
+  `_bitmatrix_metadata_compute_stage2` has a real shared-memory address
+  layout with basis columns:
+    64, 32, 16, 8, 4, 320, 128
+  The first five columns map consecutive input bits to descending output rows.
+  `brev` followed by a right shift computes those five one-hot contributions
+  exactly in one term.
+
+Before PTX:
+  shl.b32    %r93, %r31, 6;
+  shl.b32    %r94, %r29, 4;
+  shl.b32    %r95, %r19, 2;
+  shr.u32    %r96, %r23, 2;
+  and.b32    %r97, %r25, 320;
+  shl.b32    %r98, %r27, 1;
+  or.b32     %r99, %r96, %r95;
+  or.b32     %r100, %r99, %r21;
+  or.b32     %r101, %r100, %r94;
+  xor.b32    %r102, %r97, %r93;
+
+After PTX:
+  brev.b32   %r93, %r10;
+  shr.u32    %r94, %r93, 25;
+  and.b32    %r95, %r94, 124;
+  and.b32    %r96, %r10, 64;
+  shl.b32    %r97, %r96, 1;
+  and.b32    %r98, %r10, 32;
+  mul.lo.s32 %r99, %r98, 10;
+  xor.b32    %r100, %r95, %r99;
+  or.b32     %r101, %r100, %r97;
+
+After SASS:
+  BREV R12, R3;
+  SHF.R.U32.HI R14, RZ, 0x19, R12;
+
+  For input bit `i` in `[0, 4]`, `brev` places it at bit `31 - i`.
+  Shifting right by 25 moves it to bit `6 - i`, matching the five basis
+  columns bit for bit. The lowering only uses this form for reversed one-hot
+  runs, and still XORs the resulting term when any output row is shared by
+  another basis column.
+
+MoE reversed four-bit run:
+  The same checked-in stage2 specialization has a second address layout with
+  basis columns:
+    320, 32, 16, 8, 4, 128, 64
+  Columns one through four map input bits one through four to output bits five
+  through two, so `brev(x & 30) >> 25` is exact for that contiguous run too.
+
+Before PTX:
+  shl.b32    %r106, %r31, 4;
+  shl.b32    %r107, %r19, 2;
+  shr.u32    %r108, %r23, 2;
+  add.s32    %r110, %r100, %r108;
+  add.s32    %r111, %r110, %r107;
+  add.s32    %r112, %r111, %r21;
+  add.s32    %r113, %r112, %r106;
+
+After PTX:
+  and.b32    %r106, %r10, 30;
+  brev.b32   %r107, %r106;
+  shr.u32    %r108, %r107, 25;
+  add.s32    %r113, %r100, %r108;
+
+  For input bit `i` in `[1, 4]`, `brev` places it at bit `31 - i`.
+  Shifting right by 25 moves it to bit `6 - i`, matching output bits five
+  through two. Masking before `brev` removes every input bit outside that run,
+  so the replacement is bitwise exact for all 32-bit inputs.
+
+MoE sparse anti-diagonal:
+  The same stage2 specialization also has a sparse one-hot anti-diagonal:
+    input bit 0 -> output bit 6
+    input bit 1 -> output bit 5
+    input bit 3 -> output bit 3
+  These selected basis columns share `input_bit + output_bit == 6`, so masking
+  the reversed source exactly reconstructs the same layout contribution.
+
+Before PTX:
+  and.b32    %r165, %r10, 11;
+  prmt.b32   %r166, %r165, 0, 0x7701U;
+  cvt.u16.u32 %rs13, %r166;
+  ...
+  shr.u16    %rs23, %rs22, 9;
+  cvt.u32.u16 %r167, %rs23;
+
+After PTX:
+  brev.b32   %r165, %r10;
+  shr.u32    %r166, %r165, 25;
+  and.b32    %r167, %r166, 104;
+
+  For every 32-bit input `x`,
+    (brev(x) >> 25) & 0x68
+  maps exactly bits zero, one, and three to outputs six, five, and three, and
+  masks every other bit away.
+
 Effect:
   Hand-editing the emitted PTX first and assembling it with CUDA 13.1 `ptxas`
   reduced final SASS instruction lines from 10911 to 10909 for the dgrad
   shifted-run case. For the wgrad left-shift case, the same workflow reduced
   final SASS instruction lines from 6802 to 6794. For the dgrad mixed-shift
   case it reduced final SASS instruction lines from 4320 to 4312 and the cubin
-  size from 220952 to 220704 bytes. Compiling the checked-in specializations
-  from source after the lowering change emits the same multiply forms in PTX
-  and SASS.
+  size from 220952 to 220704 bytes. For the MoE reversed-run case it reduced
+  final SASS instruction lines from 400 to 392; the four-bit stage2 case reduced
+  final SASS instruction lines from 752 to 736 and the cubin size from 35616 to
+  35112 bytes. For the sparse anti-diagonal case it reduced executable SASS
+  lines from 800 to 784 and cubin size from 37120 to 36480 bytes. Compiling the
+  checked-in specializations from source after the lowering change emits the
+  same multiply and `brev` forms in PTX and SASS.

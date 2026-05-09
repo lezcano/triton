@@ -143,6 +143,52 @@ Value matrixVectorProd(TritonLLVMOpBuilder &b, const LinearLayout &A, Value x) {
   SmallVector<Value> ors;
   SmallVector<Value> xors;
 
+  // A one-hot basis on the same anti-diagonal is exactly a shifted bitreverse.
+  // Grouping sparse columns too lets brev cover both dense runs and sparse
+  // permutations without rebuilding each output bit separately.
+  for (int antiDiag = 0; antiDiag < nCol + nRow - 1; ++antiDiag) {
+    uint32_t inputMask = 0;
+    uint32_t outputMask = 0;
+    int count = 0;
+    for (int c = 0; c < nCol; ++c) {
+      uint32_t colBits = static_cast<uint32_t>(matrix[c]);
+      if (!llvm::isPowerOf2_32(colBits))
+        continue;
+      int row = llvm::countr_zero(colBits);
+      if (c + row != antiDiag)
+        continue;
+      inputMask |= 1u << c;
+      outputMask |= 1u << row;
+      ++count;
+    }
+    bool contiguous = llvm::isShiftedMask_32(inputMask);
+    if ((contiguous ? count < 4 : count < 3) || 31 - antiDiag < 0)
+      continue;
+
+    Value slice = b.and_(x, b.i32_val(inputMask));
+    Value reversed = LLVM::createLLVMIntrinsicCallOp(
+                         *b.builder, b.loc, "llvm.bitreverse.i32",
+                         b.builder->getI32Type(), {slice})
+                         .getResult(0);
+    int shift = 31 - antiDiag;
+    Value term = shift == 0 ? reversed : b.lshr(reversed, b.i32_val(shift));
+    if (!contiguous)
+      term = b.and_(term, b.i32_val(outputMask));
+    if ((outputMask & rowsUnique) == outputMask) {
+      ors.push_back(term);
+    } else {
+      xors.push_back(term);
+    }
+    for (int c = 0; c < nCol; ++c) {
+      uint32_t colBits = static_cast<uint32_t>(matrix[c]);
+      if (!llvm::isPowerOf2_32(colBits))
+        continue;
+      int row = llvm::countr_zero(colBits);
+      if (c + row == antiDiag)
+        matrix[c] = 0;
+    }
+  }
+
   // A run of shifted multi-bit bases over globally unique rows is exactly an
   // integer multiply. Consume those runs first; ptxas lowers them better than
   // rebuilding the same value from separate diagonals.
