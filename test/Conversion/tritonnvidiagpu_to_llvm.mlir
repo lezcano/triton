@@ -156,6 +156,25 @@ module attributes {"ttg.num-ctas" = 2 : i32, "ttg.num-warps" = 4 : i32} {
   }
 }
 
+// -----
+
+#shared0 = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [0], CGALayout = [[0]]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 2 : i32, "ttg.num-warps" = 4 : i32} {
+  // CHECK-LABEL: arrive_barrier_cluster_static_offset
+  tt.func @arrive_barrier_cluster_static_offset() {
+    %alloc = ttg.local_alloc {allocation.offset = 0 : i32} : () -> !ttg.memdesc<2x1xi64, #shared0, #smem, mutable>
+    %c1_i32 = arith.constant 1 : i32
+    %bar = ttg.memdesc_index %alloc[%c1_i32] : !ttg.memdesc<2x1xi64, #shared0, #smem, mutable> -> !ttg.memdesc<1xi64, #shared0, #smem, mutable>
+    // CHECK: llvm.ptrtoint
+    // CHECK: llvm.and
+    // CHECK: llvm.inttoptr
+    // CHECK: "@$0 mbarrier.arrive.shared::cluster.b64 _, [$1 + 8];", "b,r"
+    ttng.arrive_barrier %bar, 1 : !ttg.memdesc<1xi64, #shared0, #smem, mutable>
+    tt.return
+  }
+}
+
 
 // -----
 

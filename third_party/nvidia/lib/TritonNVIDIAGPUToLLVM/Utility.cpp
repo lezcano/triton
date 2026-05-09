@@ -287,7 +287,7 @@ std::pair<Value, int64_t> getStaticSharedMemoryBaseAndOffset(Value base) {
     if (elemBitWidth == 0 || elemBitWidth % 8 != 0)
       break;
     staticOffset += *constantIndex * (elemBitWidth / 8);
-    base = gep.getBase();
+    base = getInsertedValue(gep.getBase(), {0});
   }
   return {base, staticOffset};
 }

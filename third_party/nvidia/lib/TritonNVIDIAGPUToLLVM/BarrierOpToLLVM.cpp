@@ -344,13 +344,74 @@ struct ArriveBarrierOpConversion
 
     bool isCrossCluster = LLVM::NVIDIA::getCGABroadcastMask(barrierTy) != 0;
 
-    Value barrierPtr = LLVM::NVIDIA::getLeaderAddress(
-        loc, rewriter, smemObj.getBase(), barrierTy);
+    Value barrierBase = smemObj.getBase();
+    int64_t staticOffset = 0;
+    if (isCrossCluster) {
+      auto [base, offset] =
+          LLVM::NVIDIA::getStaticSharedMemoryBaseAndOffset(barrierBase);
+      auto addressOf = base.getDefiningOp<LLVM::AddressOfOp>();
+      // For global_smem, non-negative offsets below the 24-bit CTA-local field
+      // cannot affect the CTA-index bits cleared by getLeaderAddress.
+      if (addressOf && addressOf.getGlobalName() == "global_smem" &&
+          offset > 0 && offset < (1 << 24)) {
+        barrierBase = base;
+        staticOffset = offset;
+      }
+      if (staticOffset == 0) {
+        auto getGlobalSharedOffset =
+            [&](auto &&self, Value value) -> std::optional<int64_t> {
+          if (auto alloc = value.getDefiningOp<ttg::LocalAllocOp>()) {
+            auto offset =
+                alloc->getAttrOfType<IntegerAttr>("allocation.offset");
+            return offset ? std::optional<int64_t>(offset.getInt())
+                          : std::nullopt;
+          }
+          if (auto index = value.getDefiningOp<ttg::MemDescIndexOp>()) {
+            APInt indexValue;
+            if (!matchPattern(index.getIndex(), m_ConstantInt(&indexValue)) ||
+                !indexValue.isZero())
+              return std::nullopt;
+            return self(self, index.getSrc());
+          }
+          if (auto trans = value.getDefiningOp<ttg::MemDescTransOp>())
+            return self(self, trans.getSrc());
+          if (auto reshape = value.getDefiningOp<ttg::MemDescReshapeOp>())
+            return self(self, reshape.getSrc());
+          if (auto subslice = value.getDefiningOp<ttg::MemDescSubsliceOp>())
+            return self(self, subslice.getSrc());
+          if (auto reinterpret =
+                  value.getDefiningOp<ttg::MemDescReinterpretOp>())
+            return self(self, reinterpret.getSrc());
+          if (auto arg = dyn_cast<BlockArgument>(value)) {
+            if (auto partitions = dyn_cast<ttg::WarpSpecializePartitionsOp>(
+                    arg.getOwner()->getParentOp()))
+              return self(self,
+                          partitions.getExplicitCaptures()[arg.getArgNumber()]);
+          }
+          return std::nullopt;
+        };
+        if (auto offset =
+                getGlobalSharedOffset(getGlobalSharedOffset, op.getAlloc())) {
+          // The accepted path is global_smem plus zero-index views/captures.
+          if (*offset > 0 && *offset < (1 << 24)) {
+            barrierBase = b.gep(barrierBase.getType(), i8_ty, barrierBase,
+                                b.i32_val(-*offset));
+            staticOffset = *offset;
+          }
+        }
+      }
+    }
+
+    Value barrierPtr =
+        LLVM::NVIDIA::getLeaderAddress(loc, rewriter, barrierBase, barrierTy);
     // TODO: Add phase result as needed.
     std::stringstream ptxAsm;
     ptxAsm << "@$0 mbarrier.arrive."
            << (isCrossCluster ? "shared::cluster" : "shared::cta")
-           << ".b64 _, [$1]";
+           << ".b64 _, [$1";
+    if (staticOffset != 0)
+      ptxAsm << " + " << staticOffset;
+    ptxAsm << "]";
     if (op.getCount() > 1) {
       ptxAsm << ", " << op.getCount();
     }

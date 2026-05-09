@@ -1,0 +1,51 @@
+Reproducer:
+  Actual emitted PTX from checked-in Gluon kernels:
+    python/examples/gluon/05-moe-bmm1-fused-gather.py
+    python/examples/gluon/04-2cta-block-scale-matmul.py
+  Kernels:
+    ws_matmul_kernel
+    mma_scaled_warp_specialized_kernel
+
+Issue:
+  Cross-cluster barrier arrives first lower the barrier pointer to the leader
+  CTA address. Static offsets on barriers rooted at global_smem were folded into
+  that pointer before the leader mask:
+
+    add.s32 %r267, %r38, 113920;
+    and.b32 %r267, %r267, -16777232;
+    @%p57 mbarrier.arrive.shared::cluster.b64 _, [%r267];
+
+  The low 24 bits of a shared-memory object are CTA-local, and global_smem is
+  the root of that object. For a non-negative static offset below 2^24,
+
+    ((global_smem + offset) & leader_mask)
+      == ((global_smem & leader_mask) + offset)
+
+  so the exact same address can keep the static offset as a PTX immediate.
+
+PTX mutation:
+  Before:
+    add.s32 %r267, %r38, 113920;
+    and.b32 %r267, %r267, -16777232;
+    @%p57 mbarrier.arrive.shared::cluster.b64 _, [%r267];
+
+  After:
+    and.b32 %r267, %r38, -16777232;
+    @%p57 mbarrier.arrive.shared::cluster.b64 _, [%r267 + 113920];
+
+Final ws_matmul SASS on GB300:
+  Before:
+    1240 instruction slots, 39 NOPs, 1201 useful instructions
+  After:
+    1240 instruction slots, 40 NOPs, 1200 useful instructions
+
+Blockscale cross-check:
+  Applying the same guarded source lowering to all four static leader arrives
+  in mma_scaled_warp_specialized_kernel changes the exact inverse PTX baseline
+  from 1328 instruction slots, 50 NOPs, 1278 useful instructions to 1320
+  instruction slots, 47 NOPs, 1273 useful instructions.
+
+Scope:
+  The source change only applies to mbarrier.arrive.shared::cluster rooted at
+  global_smem with a non-negative static offset below the 24-bit CTA-local
+  shared-memory field. It does not change kernels or the pass pipeline.
