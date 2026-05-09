@@ -1,0 +1,111 @@
+Reproducers used during analysis:
+  checked-in dgrad specialization:
+    `python/examples/gluon/02-conv-dgrad.py`:
+    `test_op[conv2d_dgrad_fixed-1-384-64-64-384-3-3-1-0]`
+  checked-in wgrad specialization:
+    `python/examples/gluon/02-conv-wgrad.py`:
+    `test_op[conv2d_wgrad_fixed-1-128-64-64-128-1-1-1-0]`
+
+Target:
+  NVIDIA GB300
+
+Issue:
+  `matrixVectorProd` rebuilt some disjoint LinearLayout contributions as
+  separate shifts even when the same bit pattern can be represented exactly as
+  one integer multiply. LinearLayout basis columns combine over GF(2); when the
+  touched output rows are disjoint, xor, or, and integer addition agree bit for
+  bit.
+
+Dgrad shifted-basis run:
+  The real lane-layout columns include:
+    2064, 4128, 8256, 128, 256, 512, 1024
+  The first three columns are shifted copies of one seed:
+    2064 = 0x810
+    4128 = 0x810 << 1
+    8256 = 0x810 << 2
+
+Before PTX:
+  and.b32    %r270, %r1, 7;
+  shl.b32    %r271, %r270, 11;
+  shl.b32    %r272, %r1, 4;
+  and.b32    %r273, %r272, 2032;
+  or.b32     %r274, %r271, %r273;
+
+After PTX:
+  and.b32    %r270, %r1, 7;
+  shl.b32    %r271, %r1, 4;
+  and.b32    %r272, %r271, 1920;
+  mad.lo.s32 %r273, %r270, 2064, %r272;
+
+After SASS:
+  LOP3.LUT R86, R14, 0x780, RZ, 0xc0, !PT;
+  IMAD     R135, R85, 0x810, R86;
+
+  For `s = x & 7`, the three shifted basis columns touch rows
+  `{4, 5, 6, 11, 12, 13}`. Those rows are pairwise disjoint, so
+  `(s0 ? 0x810 : 0) xor (s1 ? 0x1020 : 0) xor (s2 ? 0x2040 : 0)`
+  is exactly `s * 0x810`.
+
+Wgrad matching left shifts:
+  The real matrix has two surviving left-shift terms with the same input mask.
+
+Before PTX:
+  and.b32    %r336, %r1, 24;
+  shl.b32    %r337, %r336, 10;
+  shl.b32    %r338, %r324, 4;
+  shl.b32    %r339, %r336, 2;
+  or.b32     %r344, %r337, %r338;
+  or.b32     %r345, %r343, %r339;
+  xor.b32    %r346, %r345, %r344;
+
+After PTX:
+  and.b32    %r335, %r1, 24;
+  mul.lo.s32 %r336, %r335, 1028;
+  shl.b32    %r337, %r323, 4;
+  xor.b32    %r342, %r336, %r337;
+  xor.b32    %r343, %r342, %r341;
+
+After SASS:
+  IMAD R7, R7, 0x404, RZ;
+
+  For `x = (%r1 & 24)`, `x` can only contain bits 3 and 4.
+  Therefore `x << 10` occupies bits 13 and 14 while `x << 2`
+  occupies bits 5 and 6, so `(x << 10) | (x << 2)` is exactly
+  `x * (1024 + 4)`.
+
+Dgrad matching mixed shifts:
+  A later real dgrad lane-layout matrix keeps two surviving terms with the
+  same input mask but opposite shift directions.
+
+Before PTX:
+  shr.u32    %r281, %r266, 1;
+  shl.b32    %r282, %r270, 4;
+  shl.b32    %r283, %r266, 6;
+  xor.b32    %r287, %r281, %r282;
+  or.b32     %r288, %r285, %r283;
+  xor.b32    %r289, %r287, %r288;
+
+After PTX:
+  shr.u32    %r281, %r266, 5;
+  mul.lo.u32 %r283, %r281, 2064;
+  shl.b32    %r282, %r270, 4;
+  xor.b32    %r287, %r283, %r282;
+  xor.b32    %r289, %r287, %r285;
+
+After SASS:
+  IMAD R141, R143, 0x810, RZ;
+
+  Here `%r266 = %tid.x & 96`, so it only carries bits 5 and 6. For
+  `s = %r266 >> 5`, the original right-shift term is `s << 4` and the
+  left-shift term is `s << 11`. Their output rows are disjoint, so
+  `(s << 4) xor (s << 11)` is exactly `s * (16 + 2048)`.
+
+Effect:
+  Hand-editing the emitted PTX first and assembling it with CUDA 13.1 `ptxas`
+  reduced final SASS instruction lines from 10911 to 10909 for the dgrad
+  shifted-run case. For the wgrad left-shift case, the same workflow reduced
+  final SASS instruction lines from 6802 to 6794. For the dgrad mixed-shift
+  case it reduced final SASS instruction lines from 4320 to 4312 and the cubin
+  size from 220952 to 220704 bytes. Compiling the checked-in specializations
+  from source after the lowering change emits the same multiply forms in PTX
+  and SASS.

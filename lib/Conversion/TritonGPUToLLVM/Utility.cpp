@@ -140,7 +140,43 @@ Value matrixVectorProd(TritonLLVMOpBuilder &b, const LinearLayout &A, Value x) {
     }
   }
 
-  // We iterate the matrix following the diagonals and build
+  SmallVector<Value> ors;
+  SmallVector<Value> xors;
+
+  // A run of shifted multi-bit bases over globally unique rows is exactly an
+  // integer multiply. Consume those runs first; ptxas lowers them better than
+  // rebuilding the same value from separate diagonals.
+  for (int c = 0; c < nCol;) {
+    int32_t seed = matrix[c];
+    uint32_t seedBits = static_cast<uint32_t>(seed);
+    if (llvm::popcount(seedBits) <= 1 || (seedBits & rowsUnique) != seedBits) {
+      ++c;
+      continue;
+    }
+
+    int run = 1;
+    while (c + run < nCol && run < 32 &&
+           static_cast<uint32_t>(matrix[c + run]) == (seedBits << run) &&
+           (static_cast<uint32_t>(matrix[c + run]) & rowsUnique) ==
+               static_cast<uint32_t>(matrix[c + run])) {
+      ++run;
+    }
+    if (run == 1) {
+      ++c;
+      continue;
+    }
+
+    uint32_t mask = llvm::maskTrailingOnes<uint32_t>(run) << c;
+    Value slice = b.and_(x, b.i32_val(mask));
+    if (c != 0)
+      slice = b.lshr(slice, b.i32_val(c));
+    ors.push_back(b.mul(slice, b.i32_val(seed)));
+    for (int i = 0; i < run; ++i)
+      matrix[c + i] = 0;
+    c += run;
+  }
+
+  // We iterate the remaining matrix following the diagonals and build
   // (x & mask_i) << s_i terms. Prefer OR for diagonals whose rows are unique,
   // then XOR everything else. This tends to encourage mad.lo codegen.
   auto getMaskAndAllRowsUnique = [&](int i) -> std::pair<uint32_t, bool> {
@@ -180,17 +216,61 @@ Value matrixVectorProd(TritonLLVMOpBuilder &b, const LinearLayout &A, Value x) {
   }
 
   // handle any diagonals that have survived
-  SmallVector<Value> ors;
-  SmallVector<Value> xors;
+  struct ShiftTerm {
+    uint32_t mask;
+    int shift;
+    bool allRowsUnique;
+  };
+  SmallVector<ShiftTerm> shiftTerms;
   for (int i = -nRow + 1; i < nCol; i++) {
     auto [mask, allRowsUnique] = getMaskAndAllRowsUnique(i);
     mask &= ~explicitCols;
     if (mask == 0)
       continue;
-    auto masked = b.and_(x, b.i32_val(mask));
-    auto shifted = i >= 0 ? Value(b.lshr(masked, b.i32_val(i)))
-                          : Value(b.shl(masked, b.i32_val(-i)));
-    if (allRowsUnique) {
+    shiftTerms.push_back({mask, -i, allRowsUnique});
+  }
+
+  // Combine disjoint shifted copies of the same masked bits. A multiply by a
+  // sum of powers of two is the same value when the shifted outputs do not
+  // overlap. If one copy shifts right, first rebase the common masked slice to
+  // bit zero so every contribution becomes a left shift of that slice.
+  while (!shiftTerms.empty()) {
+    ShiftTerm term = shiftTerms.pop_back_val();
+    SmallVector<int> shifts = {term.shift};
+    uint32_t outputMask =
+        term.shift >= 0 ? term.mask << term.shift : term.mask >> -term.shift;
+    for (auto it = shiftTerms.begin(); it != shiftTerms.end();) {
+      uint32_t candidateOutputMask =
+          it->shift >= 0 ? it->mask << it->shift : it->mask >> -it->shift;
+      if (it->mask == term.mask && (outputMask & candidateOutputMask) == 0) {
+        shifts.push_back(it->shift);
+        outputMask |= candidateOutputMask;
+        term.allRowsUnique &= it->allRowsUnique;
+        it = shiftTerms.erase(it);
+      } else {
+        ++it;
+      }
+    }
+
+    Value masked = b.and_(x, b.i32_val(term.mask));
+    Value shifted;
+    if (shifts.size() == 1) {
+      shifted = term.shift >= 0 ? Value(b.shl(masked, b.i32_val(term.shift)))
+                                : Value(b.lshr(masked, b.i32_val(-term.shift)));
+    } else {
+      unsigned rebase = 0;
+      if (llvm::any_of(shifts, [](int shift) { return shift < 0; })) {
+        rebase = llvm::countr_zero(term.mask);
+        masked = b.lshr(masked, b.i32_val(rebase));
+      }
+      uint32_t factor = 0;
+      for (int shift : shifts) {
+        assert(shift + rebase >= 0);
+        factor += 1u << (shift + rebase);
+      }
+      shifted = b.mul(masked, b.i32_val(factor));
+    }
+    if (term.allRowsUnique) {
       ors.push_back(shifted);
     } else {
       xors.push_back(shifted);
