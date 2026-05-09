@@ -532,7 +532,7 @@ struct CLCGetProgramIdOpConversion
       auto numCTAs = ttg::lookupNumCTAs(op);
       if (numCTAs > 1) {
         TritonLLVMOpBuilder b(loc, rewriter);
-        result = b.sdiv(result, b.i32_val(numCTAs));
+        result = b.udiv(result, b.i32_val(numCTAs));
       }
     }
 

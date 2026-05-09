@@ -68,7 +68,7 @@ module attributes {"ttg.num-ctas" = 4 : i32, "ttg.num-warps" = 4 : i32} {
   tt.func @clc_get_program_id_x_multicta(%clcResult: i128) {
     // CHECK: %[[ctaid:[^ ]*]] = {{.*}}clusterlaunchcontrol.query_cancel.get_first_ctaid::x.b32.b128
     // CHECK-NEXT: %[[four:.*]] = llvm.mlir.constant(4 : i32)
-    // CHECK-NEXT: llvm.sdiv %[[ctaid]], %[[four]] : i32
+    // CHECK-NEXT: llvm.udiv %[[ctaid]], %[[four]] : i32
     %ctaid = ttng.clc_get_program_id %clcResult, x : i128 -> i32
     tt.return
   }

@@ -1,0 +1,33 @@
+Reproducer used during analysis:
+  the checked-in multicta matmul path in
+  `python/examples/gluon/03-matmul-multicta.py`
+
+Target:
+  NVIDIA GB300
+
+Issue:
+  CLC program-id lowering divided the hardware `first_ctaid.x` result by the
+  cluster width with signed division. CTA ids are nonnegative, so the signed
+  correction sequence is unnecessary.
+
+Before PTX:
+  clusterlaunchcontrol.query_cancel.get_first_ctaid::x.b32.b128 %r57, %rq1;
+  shr.u32 %r58, %r57, 31;
+  add.s32 %r59, %r57, %r58;
+  shr.s32 %r60, %r59, 1;
+
+After PTX:
+  clusterlaunchcontrol.query_cancel.get_first_ctaid::x.b32.b128 %r57, %rq1;
+  shr.u32 %r60, %r57, 1;
+
+Before SASS:
+  LEA.HI R6, R4, R4, RZ, 0x1;
+  SHF.R.S32.HI R16, RZ, 0x1, R6;
+
+After SASS:
+  SHF.R.U32.HI R16, RZ, 0x1, R4;
+
+Effect:
+  The checked-in 2-CTA matmul specialization drops the signed divide
+  correction while preserving the exact program-id value for every realizable
+  CLC result.
