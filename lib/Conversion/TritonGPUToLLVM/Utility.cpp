@@ -324,7 +324,6 @@ Value matrixVectorProd(TritonLLVMOpBuilder &b, const LinearLayout &A, Value x) {
   }
 
   // handle any explicit columns:
-  Value zero = b.i32_val(0);
   for (int i = 0; i < nCol; i++) {
     if ((explicitCols >> i) & 1) {
       int32_t basis = matrix[i];
@@ -343,8 +342,10 @@ Value matrixVectorProd(TritonLLVMOpBuilder &b, const LinearLayout &A, Value x) {
         else
           term = b.lshr(bit, b.i32_val(col - row));
       } else {
-        Value bit_is_zero = b.icmp_eq(bit, zero);
-        term = b.select(bit_is_zero, zero, b.i32_val(basis));
+        // Normalize the selected input bit to 0/1 before replicating it into
+        // the multi-bit basis. This avoids sign-mask materialization later.
+        Value normalizedBit = i == 0 ? bit : b.lshr(bit, b.i32_val(i));
+        term = b.mul(normalizedBit, b.i32_val(basis));
       }
       if ((rowsUnique & basis) == basis) {
         ors.push_back(term);

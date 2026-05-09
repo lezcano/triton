@@ -197,6 +197,45 @@ After PTX:
   maps exactly bits zero, one, and three to outputs six, five, and three, and
   masks every other bit away.
 
+MoE explicit multi-bit columns:
+  The same stage2 specialization has explicit columns that map one input bit to
+  a multi-bit output basis:
+    input bit 5 -> output basis 320
+    input bit 6 -> output basis 320
+  The old explicit-column lowering selected either zero or the basis constant,
+  which `ptxas` materialized through a signed one-bit mask even though the same
+  input bit was already needed in unsigned 0/1 form.
+
+Before PTX:
+  and.b32    %r25, %r10, 32;
+  bfe.s32    %r26, %r10, 5, 1;
+  bfe.u32    %r27, %r10, 5, 1;
+  ...
+  and.b32    %r67, %r26, 320;
+
+Hand-mutated PTX candidate:
+  and.b32    %r25, %r10, 32;
+  bfe.u32    %r27, %r10, 5, 1;
+  ...
+  mul.lo.u32 %r67, %r27, 320;
+
+After source lowering:
+  and.b32    %r25, %r10, 32;
+  bfe.u32    %r26, %r10, 5, 1;
+  ...
+  mul.lo.s32 %r64, %r26, 320;
+
+After SASS:
+  SHF.R.U32.HI R7, RZ, 0x5, R0;
+  SGXT.U32     R7, R7, 0x1;
+  IMAD         R15, R7, 0x140, RZ;
+
+  For explicit input column `i`, `bit = x & (1 << i)` is always either zero or
+  `1 << i`. Therefore the previous `bit == 0 ? 0 : basis` is exactly
+  `(bit >> i) * basis` for every 32-bit input. The new lowering keeps the
+  already-normalized 0/1 spelling available for other users and avoids the
+  signed-mask form.
+
 Effect:
   Hand-editing the emitted PTX first and assembling it with CUDA 13.1 `ptxas`
   reduced final SASS instruction lines from 10911 to 10909 for the dgrad
@@ -207,6 +246,9 @@ Effect:
   final SASS instruction lines from 400 to 392; the four-bit stage2 case reduced
   final SASS instruction lines from 752 to 736 and the cubin size from 35616 to
   35112 bytes. For the sparse anti-diagonal case it reduced executable SASS
-  lines from 800 to 784 and cubin size from 37120 to 36480 bytes. Compiling the
-  checked-in specializations from source after the lowering change emits the
-  same multiply and `brev` forms in PTX and SASS.
+  lines from 800 to 784 and cubin size from 37120 to 36480 bytes. For the
+  explicit multi-bit-column case, the source-replayable lowering reduced the
+  current checked-in MoE stage2 SASS from 331 to 323 lines and cubin size from
+  33488 to 33040 bytes. Compiling the checked-in specializations from source
+  after the lowering change emits the same multiply and `brev` forms in PTX and
+  SASS.
