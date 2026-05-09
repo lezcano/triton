@@ -1,0 +1,34 @@
+Reproducer used during analysis:
+  a small Gluon kernel computing `gl.minimum(gl.maximum(x, -limit), limit)`
+  plus the checked-in Swiglu path in
+  `python/examples/gluon/05-moe-bmm1-fused-gather.py`
+
+Target:
+  NVIDIA GB300, lowering gated by compute capability >= 90
+
+Issue:
+  The no-NaN symmetric clip spelling lowers through `arith.maxnumf` followed
+  by `arith.minnumf`, so it missed the Hopper+ `min.xorsign.abs` path used by
+  `tt.clampf`. The checked-in MoE Swiglu path emits the dynamic
+  `negf %limit` spelling.
+
+Before PTX:
+  neg.f32 %r15, %r5;
+  max.f32 %r19, %r1, %r15;
+  min.f32 %r9, %r19, %r5;
+
+After PTX:
+  min.xorsign.abs.f32 %r9, %r1, %r5;
+
+Before SASS:
+  FMNMX R0, R0, -R13, !PT;
+  FMNMX R13, R13, R0, PT;
+
+After SASS:
+  FMNMX.XORSIGN R13, |R0|, |R13|, PT;
+
+Effect:
+  For the 4 values handled by one thread in the repro, PTX register count
+  drops from 23 to 15 and SASS uses 4 `FMNMX.XORSIGN` instructions instead of
+  8 plain `FMNMX` instructions. The same fusion removes the plain
+  `max.f32`/`min.f32` pair in the MoE Swiglu clip.

@@ -655,6 +655,20 @@ struct ExpOpConversionApprox
   }
 };
 
+static std::optional<double> getSplatInitializer(Value value) {
+  DenseTypedElementsAttr denseAttr;
+  if (matchPattern(value, m_Constant(&denseAttr))) {
+    if (denseAttr.isSplat())
+      return denseAttr.getSplatValue<APFloat>().convertToDouble();
+    return std::nullopt;
+  }
+
+  FloatAttr floatAttr;
+  if (matchPattern(value, m_Constant(&floatAttr)))
+    return floatAttr.getValue().convertToDouble();
+  return std::nullopt;
+}
+
 struct ClampFOpConversion
     : ElementwiseOpConversionBase<ClampFOp, ClampFOpConversion> {
   using Base = ElementwiseOpConversionBase<ClampFOp, ClampFOpConversion>;
@@ -686,21 +700,6 @@ struct ClampFOpConversion
     //   %cst_6 = arith.constant dense<-6.0000e+00>
     //   %cst_7 = arith.constant dense<6.0000e+00>
     //   %160 = tt.clamp %158, %cst_6, %cst_7
-
-    auto getSplatInitializer = [](Value v) -> std::optional<double> {
-      DenseTypedElementsAttr denseAttr;
-      if (matchPattern(v, m_Constant(&denseAttr))) {
-        if (denseAttr.isSplat()) {
-          return denseAttr.getSplatValue<APFloat>().convertToDouble();
-        }
-        return std::nullopt;
-      }
-      FloatAttr floatAttr;
-      if (matchPattern(v, m_Constant(&floatAttr))) {
-        return floatAttr.getValue().convertToDouble();
-      }
-      return std::nullopt;
-    };
 
     // clampf %x (negf %max) %max
     if (auto negOp = op.getOperand(1).getDefiningOp<arith::NegFOp>()) {
@@ -763,6 +762,70 @@ struct ClampFOpConversion
   }
 
 private:
+  int computeCapability;
+};
+
+struct SymmetricMinMaxFOpConversion : ConvertOpToLLVMPattern<arith::MinNumFOp> {
+  using ConvertOpToLLVMPattern<arith::MinNumFOp>::ConvertOpToLLVMPattern;
+  using Adaptor = arith::MinNumFOp::Adaptor;
+
+  explicit SymmetricMinMaxFOpConversion(
+      LLVMTypeConverter &typeConverter,
+      ModuleAxisInfoAnalysis &axisAnalysisPass, int computeCapability,
+      PatternBenefit benefit = patternBenefitDefault)
+      : ConvertOpToLLVMPattern(typeConverter, benefit),
+        axisAnalysisPass(axisAnalysisPass),
+        computeCapability(computeCapability) {}
+
+  LogicalResult
+  matchAndRewrite(arith::MinNumFOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (computeCapability < 90)
+      return failure();
+
+    auto maxOp = op.getLhs().getDefiningOp<arith::MaxNumFOp>();
+    if (!maxOp)
+      return failure();
+    auto negOp = maxOp.getRhs().getDefiningOp<arith::NegFOp>();
+    if (!negOp || negOp.getOperand() != op.getRhs())
+      return failure();
+
+    auto resultTy = op.getType();
+    auto resultElementTy = getElementTypeOrSelf(resultTy);
+    Type elemTy = getTypeConverter()->convertType(resultElementTy);
+
+    std::string name = "llvm.nvvm.fmin.xorsign.abs";
+    if (elemTy.isF32()) {
+      name += ".f";
+    } else if (elemTy.isF16()) {
+      name += ".f16";
+    } else {
+      return failure();
+    }
+
+    Value x = rewriter.getRemappedValue(maxOp.getLhs());
+    if (!x)
+      return failure();
+
+    Location loc = op.getLoc();
+    auto xElems = unpackLLElements(loc, x, rewriter);
+    auto limitElems = unpackLLElements(loc, adaptor.getRhs(), rewriter);
+    SmallVector<Value> resultVals;
+    for (auto [xElem, limitElem] : llvm::zip(xElems, limitElems)) {
+      Value args[] = {xElem, limitElem};
+      auto callOp =
+          LLVM::createLLVMIntrinsicCallOp(rewriter, loc, name, elemTy, args);
+      resultVals.push_back(callOp.getResult(0));
+    }
+
+    Value view =
+        packLLElements(loc, getTypeConverter(), resultVals, rewriter, resultTy);
+    rewriter.replaceOp(op, view);
+    return success();
+  }
+
+private:
+  ModuleAxisInfoAnalysis &axisAnalysisPass;
   int computeCapability;
 };
 
@@ -835,6 +898,9 @@ void mlir::triton::NVIDIA::populateElementwiseOpToLLVMPatterns(
                                    computeCapability, benefit);
   patterns.add<FpToFpOpConversion>(typeConverter, axisInfoAnalysis,
                                    computeCapability, benefit);
+  patterns.add<SymmetricMinMaxFOpConversion>(
+      typeConverter, axisInfoAnalysis, computeCapability,
+      PatternBenefit(benefit.getBenefit() + 1));
 
   // ExpOpConversionApprox will try using ex2.approx if the input type is
   // FP32. For other input types, ExpOpConversionApprox will return failure and
