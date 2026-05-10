@@ -1,0 +1,70 @@
+Reproducer:
+  python python/examples/gluon/05-moe-bmm1-fused-gather.py
+  pytest -q -s --tb=short 'python/examples/gluon/05-moe-bmm1-fused-gather.py::test_op[128-c0]'
+
+Kernel:
+  actual Gluon `_topk_forward`
+
+Issue:
+  The topk index lowering converts two elementwise transforms of the same
+  `%y_indices` tensor independently across the same layout change:
+
+    %y_div = arith.divui %y_indices, %c32
+    %y_rem = arith.remui %y_indices, %c32
+    %y2 = ttg.convert_layout %y_div
+    %y_onehot = arith.shli %c1, %y_rem
+    %y3 = ttg.convert_layout %y_onehot
+
+  Both conversions use the NVIDIA shared-memory swizzling path, so this emits
+  two shared-memory exchanges even though layout conversion is only an element
+  permutation.
+
+Exactness:
+  For unsigned i32 values and a power-of-two divisor `d`, permutation commutes
+  with both operations used here:
+
+    layout(x / d) == layout(x) / d
+    layout(1 << (x % d)) == 1 << (layout(x) % d)
+
+  The lowering therefore transfers `%y_indices` once and rebuilds the `divui`
+  and one-hot value elementwise after the transfer.  No floating-point or
+  approximate operation is changed.
+
+Before PTX:
+  shr.u32  %r567, %r563, 5;
+  shr.u32  %r568, %r564, 5;
+  shr.u32  %r569, %r565, 5;
+  shr.u32  %r570, %r566, 5;
+  st.shared.v4.b32  [%r572], {%r570, %r569, %r568, %r567};
+  ldmatrix.sync.aligned.m8n8.x1.shared.b16 {%r579}, [%r578];
+  and.b32  %r580, %r566, 31;
+  ...
+  st.shared.v4.b32  ...
+  ldmatrix.sync.aligned.m8n8.x1.shared.b16 ...
+
+After PTX:
+  st.shared.v2.b64  [%r568], {%rd18, %rd16};
+  ldmatrix.sync.aligned.m8n8.x1.shared.b16 {%r575}, [%r574];
+  shr.u32  %r576, %r575, 5;
+  and.b32  %r577, %r575, 31;
+  shl.b32  %r579, %r578, %r577;
+
+Before SASS:
+  SHF.R.U32.HI R5, RZ, 0x5, R9;
+  SHF.R.U32.HI R4, RZ, 0x5, R3;
+  STS.128 [R12], R4;
+  LDSM.16.M88 R3, [R14+UR4];
+  ...
+  STS.128 [R12], R8;
+  LDSM.16.M88 R13, [R14+UR4];
+
+After SASS:
+  STS.128 [R3], R4;
+  LDSM.16.M88 R8, [R8+UR4];
+  SHF.R.U32.HI R9, RZ, 0x5, R8;
+  SHF.L.W.U32 R10, R11, R8, RZ;
+
+Effect on GB300:
+  Source-generated PTX drops from 1771 to 1754 lines.
+  Source-generated final SASS drops from 688 to 683 non-padding instructions.
+  The relevant transfer drops from 2 `ldmatrix` / 2 `LDSM` instructions to 1.

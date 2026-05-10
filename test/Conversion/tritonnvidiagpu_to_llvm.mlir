@@ -702,3 +702,34 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32} {
     tt.return %cmp : i1
   }
 }
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [1, 1, 1], threadsPerWarp = [8, 4, 1], warpsPerCTA = [4, 1, 1], order = [2, 1, 0]}>
+#linear = #ttg.linear<{register = [[0, 1], [0, 2]], lane = [[0, 0], [0, 0], [1, 0], [2, 0], [4, 0]], warp = [[8, 0], [16, 0]], block = []}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32} {
+  // CHECK-LABEL: convert_power_of_two_index_ops_after_transfer
+  tt.func @convert_power_of_two_index_ops_after_transfer(%src: tensor<32x4xi32, #linear>, %out_div: !tt.ptr<i32>, %out_onehot: !tt.ptr<i32>) {
+    // CHECK: %[[LD:.*]] = nvvm.ldmatrix
+    // CHECK: %[[BITS:.*]] = llvm.insertvalue {{.*}}, {{.*}}[0] : !llvm.struct<(i32)>
+    // CHECK: %[[DIV_SRC:.*]] = llvm.extractvalue %[[BITS]][0] : !llvm.struct<(i32)>
+    // CHECK: llvm.lshr %[[DIV_SRC]]
+    // CHECK: nvvm.barrier0
+    // CHECK-NOT: nvvm.ldmatrix
+    // CHECK: %[[HOT_SRC:.*]] = llvm.extractvalue %[[BITS]][0] : !llvm.struct<(i32)>
+    // CHECK: llvm.and %[[HOT_SRC]]
+    // CHECK: llvm.shl
+    %c32 = arith.constant dense<32> : tensor<32x4xi32, #linear>
+    %c1 = arith.constant dense<1> : tensor<32x4xi32, #linear>
+    %div = arith.divui %src, %c32 : tensor<32x4xi32, #linear>
+    %rem = arith.remui %src, %c32 : tensor<32x4xi32, #linear>
+    %onehot = arith.shli %c1, %rem : tensor<32x4xi32, #linear>
+    %div_cvt = ttg.convert_layout %div {allocation.offset = 0 : i32} : tensor<32x4xi32, #linear> -> tensor<32x4xi32, #ttg.slice<{dim = 2, parent = #blocked}>>
+    %onehot_cvt = ttg.convert_layout %onehot {allocation.offset = 0 : i32} : tensor<32x4xi32, #linear> -> tensor<32x4xi32, #ttg.slice<{dim = 2, parent = #blocked}>>
+    %div_ptrs = tt.splat %out_div : !tt.ptr<i32> -> tensor<32x4x!tt.ptr<i32>, #ttg.slice<{dim = 2, parent = #blocked}>>
+    %onehot_ptrs = tt.splat %out_onehot : !tt.ptr<i32> -> tensor<32x4x!tt.ptr<i32>, #ttg.slice<{dim = 2, parent = #blocked}>>
+    tt.store %div_ptrs, %div_cvt : tensor<32x4x!tt.ptr<i32>, #ttg.slice<{dim = 2, parent = #blocked}>>
+    tt.store %onehot_ptrs, %onehot_cvt : tensor<32x4x!tt.ptr<i32>, #ttg.slice<{dim = 2, parent = #blocked}>>
+    tt.return
+  }
+}

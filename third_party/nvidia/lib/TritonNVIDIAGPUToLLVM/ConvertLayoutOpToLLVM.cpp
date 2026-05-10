@@ -2,7 +2,9 @@
 #include "TargetInfo.h"
 #include "Utility.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/NVVMDialect.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
@@ -21,6 +23,7 @@ using mlir::LLVM::NVIDIA::lowerLdStMatrix;
 struct ConvertLayoutOpSwizzlingConversion
     : public ConvertOpToLLVMPattern<triton::gpu::ConvertLayoutOp> {
   const NVIDIA::TargetInfo &targetInfo;
+  mutable DenseMap<std::pair<Value, Attribute>, Value> convertedValues;
 
   explicit ConvertLayoutOpSwizzlingConversion(
       LLVMTypeConverter &typeConverter, const NVIDIA::TargetInfo &targetInfo,
@@ -41,6 +44,9 @@ struct ConvertLayoutOpSwizzlingConversion
     assert(to_vector(conversion.getInDimNames()) ==
            to_vector(conversion.getOutDimNames()));
     if (!cvtAlwaysUseWarpShuffle(op) && cvtNeedsSharedMemory(srcTy, dstTy)) {
+      if (succeeded(tryLowerPowerOfTwoIndexOpAfterTransfer(op, rewriter)))
+        return success();
+
       auto loc = op.getLoc();
 
       auto llvmElemTy = getTypeConverter()->convertType(srcTy.getElementType());
@@ -56,6 +62,102 @@ struct ConvertLayoutOpSwizzlingConversion
       return success();
     }
     return failure();
+  }
+
+  std::optional<APInt> getSplatInt(Value value) const {
+    Attribute attr;
+    if (!matchPattern(value, m_Constant(&attr)))
+      return std::nullopt;
+    if (auto intAttr = dyn_cast<IntegerAttr>(attr))
+      return intAttr.getValue();
+    auto denseAttr = dyn_cast<DenseIntElementsAttr>(attr);
+    if (!denseAttr || !denseAttr.isSplat())
+      return std::nullopt;
+    return denseAttr.getSplatValue<APInt>();
+  }
+
+  Value getConvertedValue(ConvertLayoutOp op, Value src,
+                          ConversionPatternRewriter &rewriter) const {
+    auto srcTy = dyn_cast<RankedTensorType>(src.getType());
+    auto dstTy = dyn_cast<RankedTensorType>(op.getType());
+    if (!srcTy || !dstTy)
+      return {};
+
+    auto dstEncoding = dstTy.getEncoding();
+    auto key = std::pair<Value, Attribute>(src, dstEncoding);
+    if (auto it = convertedValues.find(key); it != convertedValues.end()) {
+      Value converted = it->second;
+      Operation *def = converted.getDefiningOp();
+      if (def && def->getBlock() == op->getBlock() && def->isBeforeInBlock(op))
+        return converted;
+    }
+
+    Value remapped = rewriter.getRemappedValue(src);
+    if (!remapped)
+      return {};
+
+    auto loc = op.getLoc();
+    auto convertedTy =
+        cast<RankedTensorType>(srcTy.cloneWithEncoding(dstEncoding));
+    auto llvmElemTy = getTypeConverter()->convertType(srcTy.getElementType());
+    auto smemBase =
+        LLVM::getSharedMemoryBase(loc, rewriter, targetInfo, op.getOperation());
+    auto inVals = unpackLLElements(loc, remapped, rewriter);
+    auto outVals = transferWithinBlockSwizzling(
+        loc, rewriter, toLinearLayout(srcTy), toLinearLayout(convertedTy),
+        inVals, llvmElemTy, smemBase);
+    Value converted =
+        packLLElements(loc, getTypeConverter(), outVals, rewriter, convertedTy);
+    convertedValues[key] = converted;
+    return converted;
+  }
+
+  LogicalResult tryLowerPowerOfTwoIndexOpAfterTransfer(
+      ConvertLayoutOp op, ConversionPatternRewriter &rewriter) const {
+    auto resultTy = dyn_cast<RankedTensorType>(op.getType());
+    if (!resultTy || !resultTy.getElementType().isInteger(32))
+      return failure();
+
+    auto buildResult = [&](Value base, auto &&buildElem) {
+      Value converted = getConvertedValue(op, base, rewriter);
+      if (!converted)
+        return failure();
+
+      auto b = TritonLLVMOpBuilder(op.getLoc(), rewriter);
+      SmallVector<Value> outVals;
+      for (Value elem : unpackLLElements(op.getLoc(), converted, rewriter))
+        outVals.push_back(buildElem(b, elem));
+      Value result = packLLElements(op.getLoc(), getTypeConverter(), outVals,
+                                    rewriter, op.getType());
+      rewriter.replaceOp(op, result);
+      return success();
+    };
+
+    if (auto div = op.getSrc().getDefiningOp<arith::DivUIOp>()) {
+      auto divisor = getSplatInt(div.getRhs());
+      if (!divisor || !divisor->isPowerOf2())
+        return failure();
+      unsigned shift = divisor->exactLogBase2();
+      return buildResult(div.getLhs(),
+                         [shift](TritonLLVMOpBuilder &b, Value elem) {
+                           return b.lshr(elem, b.i32_val(shift));
+                         });
+    }
+
+    auto shl = op.getSrc().getDefiningOp<arith::ShLIOp>();
+    auto rem =
+        shl ? shl.getRhs().getDefiningOp<arith::RemUIOp>() : arith::RemUIOp();
+    auto one = shl ? getSplatInt(shl.getLhs()) : std::nullopt;
+    auto divisor = rem ? getSplatInt(rem.getRhs()) : std::nullopt;
+    if (!rem || !one || !one->isOne() || !divisor || !divisor->isPowerOf2())
+      return failure();
+
+    uint64_t mask = divisor->getZExtValue() - 1;
+    return buildResult(rem.getLhs(),
+                       [mask](TritonLLVMOpBuilder &b, Value elem) {
+                         Value shift = b.and_(elem, b.i32_val(mask));
+                         return b.shl(b.i32_val(1), shift);
+                       });
   }
 
   SmallVector<Value> transferWithinBlockSwizzling(
