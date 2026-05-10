@@ -267,6 +267,34 @@ After SASS:
   Because rows five and six are shared with later basis columns, the combined
   run is still XORed with the remaining contribution instead of ORed into it.
 
+Blockscale unique same-diagonal split:
+  The actual checked-in `mma_scaled_warp_specialized_kernel` has one shared
+  store address layout with basis columns:
+    144, 288, 576, 1024, 2048, 4096, 8192
+  The old lowering consumed the first three multi-bit columns as a shifted run
+  before seeing that all seven columns also contain one unique bit on the same
+  diagonal.
+
+Before PTX:
+  and.b32    %r267, %r1, 7;
+  mul.lo.s32 %r268, %r267, 144;
+  shl.b32    %r269, %r1, 7;
+  and.b32    %r270, %r269, 15360;
+  or.b32     %r271, %r268, %r270;
+
+After source lowering:
+  shl.b32    %r267, %r1, 7;
+  and.b32    %r268, %r267, 16256;
+  shl.b32    %r269, %r1, 4;
+  and.b32    %r270, %r269, 112;
+  or.b32     %r271, %r268, %r270;
+
+  Every extracted output row is globally unique, so the long diagonal
+  contribution is exactly `(x & 127) << 7`; clearing those bits leaves the
+  remaining low rows as `(x & 7) << 4`.  Splitting unique rows before the
+  shifted multi-bit run therefore preserves the LinearLayout bit for bit while
+  exposing simpler PTX for PTXAS.
+
 Effect:
   Hand-editing the emitted PTX first and assembling it with CUDA 13.1 `ptxas`
   reduced final SASS instruction lines from 10911 to 10909 for the dgrad
@@ -282,5 +310,7 @@ Effect:
   current checked-in MoE stage2 SASS from 331 to 323 lines and cubin size from
   33488 to 33040 bytes. For the pairwise-disjoint multi-bit run, the exact
   PTX mutation reduced `_sum_bitmatrix_rows` SASS from 144 to 136 lines.
+  For the blockscale same-diagonal split, source replay of the actual checked-in
+  kernel reduced non-NOP final SASS from 1275 to 1274 instructions.
   Compiling the checked-in specializations from source after the lowering
   change emits the same multiply and `brev` forms in PTX and SASS.

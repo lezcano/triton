@@ -189,6 +189,40 @@ Value matrixVectorProd(TritonLLVMOpBuilder &b, const LinearLayout &A, Value x) {
     }
   }
 
+  // Pull long unique same-diagonal runs out of multi-bit columns before the
+  // shifted-run pass consumes those columns wholesale.  The extracted rows are
+  // globally unique, so this is exactly a shifted masked slice and can expose a
+  // larger contiguous run than the remaining multi-bit contribution.
+  for (int shift = -nCol + 1; shift < nRow; ++shift) {
+    uint32_t inputMask = 0;
+    for (int c = 0; c < nCol; ++c) {
+      int row = c + shift;
+      if (row < 0 || row >= nRow)
+        continue;
+      uint32_t bit = 1u << row;
+      if ((static_cast<uint32_t>(matrix[c]) & bit) != 0 &&
+          (rowsUnique & bit) != 0)
+        inputMask |= 1u << c;
+    }
+    if (!llvm::isShiftedMask_32(inputMask) || llvm::popcount(inputMask) < 4)
+      continue;
+
+    Value masked = b.and_(x, b.i32_val(inputMask));
+    Value term = shift >= 0 ? Value(b.shl(masked, b.i32_val(shift)))
+                            : Value(b.lshr(masked, b.i32_val(-shift)));
+    ors.push_back(term);
+
+    for (int c = 0; c < nCol; ++c) {
+      int row = c + shift;
+      if (row < 0 || row >= nRow)
+        continue;
+      uint32_t bit = 1u << row;
+      if ((static_cast<uint32_t>(matrix[c]) & bit) != 0 &&
+          (rowsUnique & bit) != 0)
+        matrix[c] &= ~bit;
+    }
+  }
+
   // A run of shifted multi-bit bases is exactly an integer multiply when the
   // shifted copies are pairwise disjoint. Consume those runs first; ptxas
   // lowers them better than rebuilding the same value from separate diagonals.
