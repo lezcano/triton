@@ -216,7 +216,10 @@ getLeaderCTAPredicate(Location loc, ConversionPatternRewriter &rewriter,
     return std::nullopt;
 
   Value ctaId = nvgpu::ClusterCTAIdOp::create(rewriter, loc);
-  Value ctaIdInGroup = b.and_(ctaId, b.i32_val(maskCGABroadcast));
+  int numCTAs = triton::gpu::lookupNumCTAs(rewriter);
+  Value ctaIdInGroup = numCTAs == 2 && maskCGABroadcast == 1
+                           ? ctaId
+                           : b.and_(ctaId, b.i32_val(maskCGABroadcast));
   return std::optional<Value>(b.icmp_eq(ctaIdInGroup, b.i32_val(0)));
 }
 
@@ -295,7 +298,8 @@ std::pair<Value, int64_t> getStaticSharedMemoryBaseAndOffset(Value base) {
 Value createLeadCTAPredicate(Location loc, RewriterBase &rewriter) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   Value leftClusterId = nvgpu::ClusterCTAIdOp::create(rewriter, loc);
-  leftClusterId = b.and_(leftClusterId, b.i32_val(1));
+  if (triton::gpu::lookupNumCTAs(rewriter) != 2)
+    leftClusterId = b.and_(leftClusterId, b.i32_val(1));
   Value cluster0 = b.icmp_eq(leftClusterId, b.i32_val(0));
   return cluster0;
 }

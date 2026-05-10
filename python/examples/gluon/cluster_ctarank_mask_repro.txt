@@ -1,0 +1,39 @@
+Reproducers used during analysis:
+  checked-in MoE specialization:
+    `python/examples/gluon/05-moe-bmm1-fused-gather.py`:
+    `test_op[128-c0]`
+  checked-in block-scale specialization:
+    `python/examples/gluon/04-2cta-block-scale-matmul.py`:
+    `test_mma_scaled_warp_specialized[2-256-256-4-mxfp8-mxfp8-128-128-128]`
+
+Target:
+  NVIDIA GB300
+
+Issue:
+  `getLeaderCTAPredicate` and `createLeadCTAPredicate` masked
+  `%cluster_ctarank` with one even in two-CTA kernels.  Those kernels declare
+  `.reqnctapercluster 2`, so `%cluster_ctarank` is already exactly zero or one.
+
+Before PTX:
+  mov.u32     %r23, %cluster_ctarank;
+  and.b32     %r204, %r23, 1;
+  setp.ne.b32 %p60, %r204, 0;
+
+After PTX:
+  mov.u32     %r23, %cluster_ctarank;
+  setp.ne.b32 %p60, %r23, 0;
+
+Exactness:
+  PTX fixes the cluster size with `.reqnctapercluster 2`, so the special
+  register only returns CTA ranks zero and one.  Therefore
+    cluster_ctarank & 1 == cluster_ctarank
+  bit for bit in these helper lowerings.  Kernels with any other CTA count keep
+  the existing mask.
+
+Effect:
+  Hand-editing the emitted PTX first and assembling with `ptxas-blackwell`
+  changed the real `ws_matmul_kernel` final SASS from 1232 scheduled slots,
+  34 NOPs, and 1198 useful instructions to 1232 slots, 36 NOPs, and 1196 useful
+  instructions.  The same helper-only edit changes the real block-scale kernel
+  from 1320 slots, 48 NOPs, and 1272 useful instructions to 1320 slots,
+  49 NOPs, and 1271 useful instructions.
