@@ -733,3 +733,29 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32} {
     tt.return
   }
 }
+
+// -----
+
+#blocked2d = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [8, 4], warpsPerCTA = [4, 1], order = [1, 0]}>
+#linear = #ttg.linear<{register = [[0, 1], [0, 2]], lane = [[0, 0], [0, 0], [1, 0], [2, 0], [4, 0]], warp = [[8, 0], [16, 0]], block = []}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32} {
+  // CHECK-LABEL: convert_paired_i16_trunc_after_transfer
+  tt.func @convert_paired_i16_trunc_after_transfer(%values: tensor<32x4xf16, #linear>, %indices: tensor<32x4xi32, #linear>, %out_values: !tt.ptr<f16>, %out_indices: !tt.ptr<i16>) {
+    // CHECK: %[[PACKED:.*]] = llvm.or disjoint
+    // CHECK: %[[LD:.*]] = nvvm.ldmatrix
+    // CHECK: %[[VEC:.*]] = llvm.bitcast %[[LD]]
+    // CHECK: %[[BITS:.*]] = llvm.extractelement %[[VEC]]
+    // CHECK: llvm.trunc %[[BITS]]
+    // CHECK: llvm.lshr %[[BITS]]
+    // CHECK-NOT: nvvm.barrier0
+    // CHECK-NOT: nvvm.ldmatrix
+    %values_cvt = ttg.convert_layout %values {allocation.offset = 0 : i32} : tensor<32x4xf16, #linear> -> tensor<32x4xf16, #blocked2d>
+    %value_ptrs = tt.splat %out_values : !tt.ptr<f16> -> tensor<32x4x!tt.ptr<f16>, #blocked2d>
+    tt.store %value_ptrs, %values_cvt : tensor<32x4x!tt.ptr<f16>, #blocked2d>
+    %indices16 = arith.trunci %indices : tensor<32x4xi32, #linear> to tensor<32x4xi16, #linear>
+    %indices_cvt = ttg.convert_layout %indices16 {allocation.offset = 0 : i32} : tensor<32x4xi16, #linear> -> tensor<32x4xi16, #blocked2d>
+    %index_ptrs = tt.splat %out_indices : !tt.ptr<i16> -> tensor<32x4x!tt.ptr<i16>, #blocked2d>
+    tt.store %index_ptrs, %indices_cvt : tensor<32x4x!tt.ptr<i16>, #blocked2d>
+    tt.return
+  }
+}

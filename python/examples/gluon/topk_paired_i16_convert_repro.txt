@@ -1,0 +1,78 @@
+Reproducer:
+  python python/examples/gluon/05-moe-bmm1-fused-gather.py
+  pytest -q -s --tb=short 'python/examples/gluon/05-moe-bmm1-fused-gather.py::test_op[128-c0]'
+
+Kernel:
+  actual Gluon `_topk_forward`
+
+Issue:
+  `_topk_forward` stores two tensors with the same 16-bit layout conversion:
+  the fp16 top-k values and the low 16 bits of the i32 top-k indices.  Lowering
+  them independently uses two shared-memory exchanges even though the two
+  element permutations are identical.
+
+Exactness:
+  The lowering packs the fp16 payload bits into the low half of an i32 and the
+  exact `trunci` result into the high half, applies the common layout
+  permutation once, then extracts the original halves again.  This changes only
+  the transport representation; neither floating-point values nor integer
+  truncation semantics change.
+
+Before PTX:
+  st.shared.b16 [%r564], %rs7;
+  st.shared.b16 [%r564+32], %rs8;
+  ...
+  ld.shared.b16 %rs1, [%r566];
+  ...
+  st.shared.b16 [%r564], %r526;
+  st.shared.b16 [%r564+32], %rd19;
+  ...
+  ld.shared.b16 %rs2, [%r566];
+
+After PTX:
+  st.shared.v4.b32 [%r569], {%r566, %r565, %r564, %r563};
+  ldmatrix.sync.aligned.m8n8.x1.shared.b16 {%r576}, [%r575];
+  cvt.u16.u32 %rs1, %r576;
+  mov.b32 {_, %rs2}, %r576;
+
+Before SASS:
+  STS.U16 [R6+UR4], R12;
+  STS.U16 [R6+UR4+0x20], R14;
+  ...
+  LDS.U16 R13, [R7+UR4];
+  ...
+  STS.U16 [R6+UR4], R18;
+  ...
+  LDS.U16 R7, [R7+UR4];
+
+After SASS:
+  PRMT R11, R10, 0x5410, R7;
+  PRMT R10, R9, 0x5410, R6;
+  PRMT R9, R8, 0x5410, R5;
+  PRMT R8, R13, 0x5410, R4;
+  STS.128 [R3], R8;
+  LDSM.16.M88 R23, [R12+UR4];
+
+Effect on GB300:
+  Source-generated PTX drops from 1768 to 1755 lines.
+  Source-generated final SASS drops from 699 to 683 non-padding instructions.
+
+Follow-up barrier refinement:
+  `ModuleMembarAnalysis` still sees the two source converts before LLVM
+  lowering and inserts a CTA barrier before the second one.  Once the lowering
+  packs the pair, that second scratch exchange no longer exists.  The NVIDIA
+  membar filter now reuses the exact same pair predicate as the lowering and
+  skips only that automatically inserted barrier.
+
+Before follow-up PTX:
+  @%p3 st.global.b16 [ %rd9 + 0 ], { %rs1 };
+  bar.sync 0;
+  @%p3 st.global.b16 [ %rd10 + 0 ], { %rs2 };
+
+After follow-up PTX:
+  @%p3 st.global.b16 [ %rd9 + 0 ], { %rs1 };
+  @%p3 st.global.b16 [ %rd10 + 0 ], { %rs2 };
+
+Additional effect on current GB300 source:
+  Reassembled non-padding SASS drops from 665 to 664 instructions.
+  The executable PTX body drops one `bar.sync 0`.

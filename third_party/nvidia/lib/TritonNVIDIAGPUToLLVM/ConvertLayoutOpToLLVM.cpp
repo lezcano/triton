@@ -13,12 +13,45 @@
 #include "triton/Tools/GenericSwizzling.h"
 #include "triton/Tools/LayoutUtils.h"
 
-namespace {
-
 using namespace mlir;
 using namespace mlir::triton;
 using namespace mlir::triton::gpu;
 using mlir::LLVM::NVIDIA::lowerLdStMatrix;
+
+bool mlir::triton::NVIDIA::canPackPairedI16TruncConverts(Operation *lhs,
+                                                         Operation *rhs) {
+  auto lhsCvt = dyn_cast<ConvertLayoutOp>(lhs);
+  auto rhsCvt = dyn_cast<ConvertLayoutOp>(rhs);
+  if (!lhsCvt || !rhsCvt)
+    return false;
+
+  auto lhsSrcTy = dyn_cast<RankedTensorType>(lhsCvt.getSrc().getType());
+  auto lhsDstTy = dyn_cast<RankedTensorType>(lhsCvt.getType());
+  auto rhsSrcTy = dyn_cast<RankedTensorType>(rhsCvt.getSrc().getType());
+  auto rhsDstTy = dyn_cast<RankedTensorType>(rhsCvt.getType());
+  auto rhsTrunc = rhsCvt.getSrc().getDefiningOp<arith::TruncIOp>();
+  auto truncSrcTy = rhsTrunc
+                        ? dyn_cast<RankedTensorType>(rhsTrunc.getIn().getType())
+                        : RankedTensorType();
+  Operation *truncSrcDef =
+      rhsTrunc ? rhsTrunc.getIn().getDefiningOp() : nullptr;
+  return lhsSrcTy && lhsDstTy && rhsSrcTy && rhsDstTy && rhsTrunc &&
+         isa<IntegerType, FloatType>(lhsSrcTy.getElementType()) &&
+         lhsSrcTy.getElementType().getIntOrFloatBitWidth() == 16 &&
+         rhsSrcTy.getElementType().isInteger(16) &&
+         rhsDstTy.getElementType().isInteger(16) && truncSrcTy &&
+         (!truncSrcDef || (truncSrcDef->getBlock() == lhsCvt->getBlock() &&
+                           truncSrcDef->isBeforeInBlock(lhsCvt))) &&
+         truncSrcTy.getElementType().isInteger(32) &&
+         lhsSrcTy.getShape() == rhsSrcTy.getShape() &&
+         lhsDstTy.getShape() == rhsDstTy.getShape() &&
+         lhsSrcTy.getEncoding() == rhsSrcTy.getEncoding() &&
+         lhsDstTy.getEncoding() == rhsDstTy.getEncoding() &&
+         lhsCvt->getAttr("allocation.offset") ==
+             rhsCvt->getAttr("allocation.offset");
+}
+
+namespace {
 
 struct ConvertLayoutOpSwizzlingConversion
     : public ConvertOpToLLVMPattern<triton::gpu::ConvertLayoutOp> {
@@ -44,6 +77,9 @@ struct ConvertLayoutOpSwizzlingConversion
     assert(to_vector(conversion.getInDimNames()) ==
            to_vector(conversion.getOutDimNames()));
     if (!cvtAlwaysUseWarpShuffle(op) && cvtNeedsSharedMemory(srcTy, dstTy)) {
+      if (succeeded(tryLowerPairedI16TruncConvert(op, adaptor, rewriter)))
+        return success();
+
       if (succeeded(tryLowerPowerOfTwoIndexOpAfterTransfer(op, rewriter)))
         return success();
 
@@ -158,6 +194,79 @@ struct ConvertLayoutOpSwizzlingConversion
                          Value shift = b.and_(elem, b.i32_val(mask));
                          return b.shl(b.i32_val(1), shift);
                        });
+  }
+
+  LogicalResult
+  tryLowerPairedI16TruncConvert(ConvertLayoutOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const {
+    auto srcTy = cast<RankedTensorType>(op.getSrc().getType());
+    auto dstTy = cast<RankedTensorType>(op.getType());
+    if (!isa<IntegerType, FloatType>(srcTy.getElementType()) ||
+        srcTy.getElementType().getIntOrFloatBitWidth() != 16)
+      return failure();
+
+    ConvertLayoutOp paired;
+    arith::TruncIOp pairedTrunc;
+    // Two same-layout 16-bit tensors can share one i32 swizzle transfer when
+    // the second tensor is the exact low half of an already available i32.
+    for (Operation *candidate = op->getNextNode(); candidate;
+         candidate = candidate->getNextNode()) {
+      auto cvt = dyn_cast<ConvertLayoutOp>(candidate);
+      if (!cvt || !NVIDIA::canPackPairedI16TruncConverts(op, cvt))
+        continue;
+      paired = cvt;
+      pairedTrunc = cvt.getSrc().getDefiningOp<arith::TruncIOp>();
+      break;
+    }
+    if (!paired)
+      return failure();
+
+    Value truncSrc = rewriter.getRemappedValue(pairedTrunc.getIn());
+    if (!truncSrc)
+      return failure();
+
+    auto loc = op.getLoc();
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+    auto llvmElemTy = getTypeConverter()->convertType(srcTy.getElementType());
+    auto smemBase =
+        LLVM::getSharedMemoryBase(loc, rewriter, targetInfo, op.getOperation());
+    auto lhsVals = unpackLLElements(loc, adaptor.getSrc(), rewriter);
+    auto truncVals = unpackLLElements(loc, truncSrc, rewriter);
+    if (lhsVals.size() != truncVals.size())
+      return failure();
+
+    SmallVector<Value> packedVals;
+    for (auto [lhs, truncVal] : llvm::zip(lhsVals, truncVals)) {
+      Value lhsBits =
+          llvmElemTy.isInteger(16) ? lhs : b.bitcast(lhs, i16_ty).getResult();
+      Value lhsI32 = b.zext(i32_ty, lhsBits);
+      Value rhsI16 = b.trunc(i16_ty, truncVal);
+      Value rhsI32 = b.zext(i32_ty, rhsI16);
+      Value rhsShifted = b.shl(rhsI32, b.i32_val(16));
+      packedVals.push_back(b.or_(lhsI32, rhsShifted, /*disjoint=*/true));
+    }
+
+    auto packedOutVals = transferWithinBlockSwizzling(
+        loc, rewriter, toLinearLayout(srcTy), toLinearLayout(dstTy), packedVals,
+        i32_ty, smemBase);
+    SmallVector<Value> lhsOutVals;
+    SmallVector<Value> rhsOutVals;
+    for (Value packed : packedOutVals) {
+      Value lhsBits = b.trunc(i16_ty, packed);
+      lhsOutVals.push_back(llvmElemTy.isInteger(16)
+                               ? lhsBits
+                               : b.bitcast(lhsBits, llvmElemTy).getResult());
+      Value rhsI32 = b.lshr(packed, b.i32_val(16));
+      rhsOutVals.push_back(b.trunc(i16_ty, rhsI32));
+    }
+
+    Value lhsResult =
+        packLLElements(loc, getTypeConverter(), lhsOutVals, rewriter, dstTy);
+    Value rhsResult = packLLElements(loc, getTypeConverter(), rhsOutVals,
+                                     rewriter, paired.getType());
+    rewriter.replaceOp(op, lhsResult);
+    rewriter.replaceOp(paired, rhsResult);
+    return success();
   }
 
   SmallVector<Value> transferWithinBlockSwizzling(

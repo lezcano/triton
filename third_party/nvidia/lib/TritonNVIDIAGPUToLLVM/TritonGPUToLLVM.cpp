@@ -528,6 +528,9 @@ bool NVIDIA::canSkipBarSync(Operation *before, Operation *after,
       isa<ttng::WaitBarrierOp>(after))
     return true;
 
+  if (NVIDIA::canPackPairedI16TruncConverts(before, after))
+    return true;
+
   return false;
 }
 

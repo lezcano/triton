@@ -10,6 +10,8 @@ namespace triton {
 
 namespace NVIDIA {
 
+bool canPackPairedI16TruncConverts(Operation *lhs, Operation *rhs);
+
 void populateBarrierOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                      RewritePatternSet &patterns,
                                      PatternBenefit benefit,
