@@ -1,0 +1,39 @@
+Reproducer used during analysis:
+  the checked-in MoE specialization in
+  `python/examples/gluon/05-moe-bmm1-fused-gather.py`:
+  `test_op[128-c0]`
+
+Target:
+  NVIDIA GB300
+
+Issue:
+  `_sum_bitmatrix_rows` computes two shifted views of the same contiguous
+  LinearLayout slice.  The normalized view already exists as
+  `(x & 96) >> 5`, but the wider view was rebuilt independently as
+  `(x & 96) >> 3`.
+
+Before PTX:
+  and.b32 %r66, %r11, 96;
+  bfe.u32 %r67, %r11, 5, 2;
+  ...
+  shr.u32 %r80, %r66, 3;
+
+After PTX:
+  bfe.u32 %r67, %r11, 5, 2;
+  ...
+  shl.b32 %r80, %r67, 2;
+
+Proof:
+  Let `mask` be a shifted contiguous mask whose least-significant set bit is
+  `k`.  If `s < k`, then all bits surviving `(x & mask) >> s` are exactly the
+  bits of the normalized slice `(x & mask) >> k`, shifted left by `k - s`.
+  Therefore:
+    (x & mask) >> s == ((x & mask) >> k) << (k - s)
+  bit for bit.  The canonicalizer only rewrites when the normalized extraction
+  already exists, so it never introduces extra work speculatively.
+
+Effect:
+  Applying the lowering change to the checked-in `_sum_bitmatrix_rows` kernel
+  removes the second mask-and-shift sequence, drops PTX integer registers from
+  97 to 95, reduces non-NOP SASS instructions from 130 to 127, and reduces the
+  cubin size from 18240 to 17912 bytes.
